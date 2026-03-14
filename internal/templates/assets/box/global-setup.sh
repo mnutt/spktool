@@ -11,6 +11,7 @@ set -euo pipefail
 CURL_OPTS="--silent --show-error"
 echo localhost > /etc/hostname
 hostname localhost
+. /opt/app/.sandstorm/.generated/runtime.env
 
 # Grub updates don't silent install well
 apt-mark hold grub-pc
@@ -34,16 +35,29 @@ if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
 fi
 if [ ! -e /opt/sandstorm/latest/sandstorm ] ; then
     echo -n "Installing Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    bash /host-dot-sandstorm/caches/install.sh -d -e -p 6090 "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
+    bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
     echo "...done."
 fi
 modprobe ip_tables
-# Make the vagrant user part of the sandstorm group so that commands like
-# `spk dev` work.
-usermod -a -G 'sandstorm' 'vagrant'
+# Make the primary guest user part of the sandstorm group so that commands like
+# `spk dev` work across providers.
+APP_USER="${SUDO_USER:-}"
+if [[ -z "${APP_USER}" || "${APP_USER}" == "root" ]]; then
+    if id -u vagrant >/dev/null 2>&1; then
+        APP_USER="vagrant"
+    else
+        APP_USER="$(find /home -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | head -n1)"
+    fi
+fi
+if [[ -n "${APP_USER}" ]] && id -u "${APP_USER}" >/dev/null 2>&1; then
+    usermod -a -G 'sandstorm' "${APP_USER}"
+fi
 # Bind to all addresses, so the vagrant port-forward works.
 sudo sed --in-place='' \
         --expression='s/^BIND_IP=.*/BIND_IP=0.0.0.0/' \
+        --expression="s#^PORT=.*#PORT=${SANDSTORM_GUEST_PORT}#" \
+        --expression="s#^BASE_URL=.*#BASE_URL=${SANDSTORM_BASE_URL}#" \
+        --expression="s#^WILDCARD_HOST=.*#WILDCARD_HOST=${SANDSTORM_WILDCARD_HOST}#" \
         /opt/sandstorm/sandstorm.conf
 
 # Force vagrant-spk to use the strict CSP, see sandstorm#3424 for details.

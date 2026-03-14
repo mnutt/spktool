@@ -28,6 +28,7 @@ type Spec struct {
 	Retries     int
 	Redactions  []string
 	Interactive bool
+	Stream      bool
 }
 
 type Result struct {
@@ -110,6 +111,9 @@ func (r *ExecRunner) runOnce(ctx context.Context, spec Spec, traceID string) (Re
 	var stderr bytes.Buffer
 	if spec.Interactive {
 		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else if spec.Stream {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {

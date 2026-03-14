@@ -9,72 +9,77 @@ import (
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/providers"
 	"github.com/mnutt/spktool/internal/runner"
+	"github.com/mnutt/spktool/internal/services"
 )
 
 type fakeApp struct {
-	setupVM    func(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
-	dev        func(context.Context, string) (*domain.ProjectState, error)
-	pack       func(context.Context, string, string) (*domain.ProjectState, error)
-	verify     func(context.Context, string, string) (*domain.ProjectState, error)
-	publish    func(context.Context, string, string) (*domain.ProjectState, error)
-	keygen     func(context.Context, string, []string) (runner.Result, error)
-	listkeys   func(context.Context, string, []string) (runner.Result, error)
-	getkey     func(context.Context, string, string) (runner.Result, error)
-	enterGrain func(context.Context, string) (*domain.ProjectState, error)
-	vmUp       func(context.Context, string) (*domain.ProjectState, error)
-	status     func(context.Context, string) (providers.Status, error)
+	setupVM    func(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
+	renderCfg  func(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
+	dev        func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	pack       func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	verify     func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	publish    func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	keygen     func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
+	listkeys   func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
+	getkey     func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
+	enterGrain func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	vmUp       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	status     func(context.Context, string, domain.ProviderName) (providers.Status, error)
 	stacks     []string
 }
 
-func (a *fakeApp) SetupVM(ctx context.Context, workDir string, provider domain.ProviderName, stack string) (*domain.ProjectState, error) {
-	return a.setupVM(ctx, workDir, provider, stack)
+func (a *fakeApp) SetupVM(ctx context.Context, workDir string, provider domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
+	return a.setupVM(ctx, workDir, provider, stack, force)
 }
-func (a *fakeApp) UpgradeVM(context.Context, string) (*domain.ProjectState, error) {
+func (a *fakeApp) UpgradeVM(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) Init(context.Context, string) (*domain.ProjectState, error) {
+func (a *fakeApp) RenderConfig(ctx context.Context, workDir string, provider domain.ProviderName) (*services.ConfigRender, error) {
+	return a.renderCfg(ctx, workDir, provider)
+}
+func (a *fakeApp) Init(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) Dev(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	return a.dev(ctx, workDir)
+func (a *fakeApp) Dev(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.dev(ctx, workDir, provider)
 }
-func (a *fakeApp) Pack(ctx context.Context, workDir, output string) (*domain.ProjectState, error) {
-	return a.pack(ctx, workDir, output)
+func (a *fakeApp) Pack(ctx context.Context, workDir, output string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.pack(ctx, workDir, output, provider)
 }
-func (a *fakeApp) Verify(ctx context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
-	return a.verify(ctx, workDir, spkPath)
+func (a *fakeApp) Verify(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.verify(ctx, workDir, spkPath, provider)
 }
-func (a *fakeApp) Publish(ctx context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
-	return a.publish(ctx, workDir, spkPath)
+func (a *fakeApp) Publish(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.publish(ctx, workDir, spkPath, provider)
 }
-func (a *fakeApp) Keygen(ctx context.Context, workDir string, args []string) (runner.Result, error) {
-	return a.keygen(ctx, workDir, args)
+func (a *fakeApp) Keygen(ctx context.Context, workDir string, args []string, provider domain.ProviderName) (runner.Result, error) {
+	return a.keygen(ctx, workDir, args, provider)
 }
-func (a *fakeApp) ListKeys(ctx context.Context, workDir string, args []string) (runner.Result, error) {
-	return a.listkeys(ctx, workDir, args)
+func (a *fakeApp) ListKeys(ctx context.Context, workDir string, args []string, provider domain.ProviderName) (runner.Result, error) {
+	return a.listkeys(ctx, workDir, args, provider)
 }
-func (a *fakeApp) GetKey(ctx context.Context, workDir, keyID string) (runner.Result, error) {
-	return a.getkey(ctx, workDir, keyID)
+func (a *fakeApp) GetKey(ctx context.Context, workDir, keyID string, provider domain.ProviderName) (runner.Result, error) {
+	return a.getkey(ctx, workDir, keyID, provider)
 }
-func (a *fakeApp) EnterGrain(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	return a.enterGrain(ctx, workDir)
+func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.enterGrain(ctx, workDir, provider)
 }
-func (a *fakeApp) VMUp(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	return a.vmUp(ctx, workDir)
+func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.vmUp(ctx, workDir, provider)
 }
-func (a *fakeApp) VMHalt(context.Context, string) (*domain.ProjectState, error) {
+func (a *fakeApp) VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) VMDestroy(context.Context, string) (*domain.ProjectState, error) {
+func (a *fakeApp) VMDestroy(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) VMStatus(ctx context.Context, workDir string) (providers.Status, error) {
-	return a.status(ctx, workDir)
+func (a *fakeApp) VMStatus(ctx context.Context, workDir string, provider domain.ProviderName) (providers.Status, error) {
+	return a.status(ctx, workDir, provider)
 }
-func (a *fakeApp) VMProvision(context.Context, string) (*domain.ProjectState, error) {
+func (a *fakeApp) VMProvision(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) VMSSH(context.Context, string, []string) (*domain.ProjectState, error) {
+func (a *fakeApp) VMSSH(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
 func (a *fakeApp) StackNames() ([]string, error) { return a.stacks, nil }
@@ -89,15 +94,17 @@ func TestRunSetupVMUsesDefaultProviderAndPrintsText(t *testing.T) {
 
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		setupVM: func(_ context.Context, workDir string, provider domain.ProviderName, stack string) (*domain.ProjectState, error) {
+		setupVM: func(_ context.Context, workDir string, provider domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
 			gotWorkDir = workDir
 			gotProvider = provider
 			gotStack = stack
+			if force {
+				t.Fatal("did not expect force")
+			}
 			return &domain.ProjectState{
 				Provider:   provider,
 				Stack:      stack,
 				VMInstance: "sandstorm-demo",
-				Migration:  1,
 			}, nil
 		},
 	}
@@ -116,8 +123,136 @@ func TestRunSetupVMUsesDefaultProviderAndPrintsText(t *testing.T) {
 	if gotWorkDir != "/tmp/demo" || gotProvider != domain.ProviderVagrant || gotStack != "lemp" {
 		t.Fatalf("unexpected call args: workdir=%q provider=%q stack=%q", gotWorkDir, gotProvider, gotStack)
 	}
-	if got := stdout.String(); got != "provider=vagrant stack=lemp vm=sandstorm-demo migration=1\n" {
+	if got := stdout.String(); got != "provider=vagrant stack=lemp vm=sandstorm-demo\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunSetupVMParsesProviderAfterCommand(t *testing.T) {
+	t.Parallel()
+
+	var gotProvider domain.ProviderName
+	var gotForce bool
+	app := &fakeApp{
+		stacks: []string{"node"},
+		setupVM: func(_ context.Context, _ string, provider domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
+			gotProvider = provider
+			gotForce = force
+			return &domain.ProjectState{Provider: provider, Stack: stack, VMInstance: "sandstorm-demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program: "spktool",
+		Args:    []string{"setupvm", "node", "--provider", "lima"},
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider != domain.ProviderLima {
+		t.Fatalf("expected provider override to be parsed, got %q", gotProvider)
+	}
+	if gotForce {
+		t.Fatal("did not expect force")
+	}
+}
+
+func TestRunSetupVMParsesForceFlag(t *testing.T) {
+	t.Parallel()
+
+	var gotForce bool
+	app := &fakeApp{
+		stacks: []string{"node"},
+		setupVM: func(_ context.Context, _ string, _ domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
+			gotForce = force
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: stack, VMInstance: "sandstorm-demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program: "spktool",
+		Args:    []string{"setupvm", "--force", "node"},
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotForce {
+		t.Fatal("expected force flag to be passed through")
+	}
+}
+
+func TestRunConfigRenderDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotWorkDir string
+	var gotProvider domain.ProviderName
+
+	app := &fakeApp{
+		stacks: []string{"node"},
+		renderCfg: func(_ context.Context, workDir string, provider domain.ProviderName) (*services.ConfigRender, error) {
+			gotWorkDir = workDir
+			gotProvider = provider
+			return &services.ConfigRender{
+				Provider: provider,
+				Files: []services.ConfigRenderFile{
+					{Path: ".sandstorm/.generated/lima.yaml", Body: "vmType: vz\n"},
+					{Path: ".sandstorm/.generated/runtime.env", Body: "SANDSTORM_EXTERNAL_PORT=6090\n"},
+				},
+			}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program: "spktool",
+		Args:    []string{"config", "render", "--provider", "lima", "--work-directory", "/workspace/app"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotWorkDir != "/workspace/app" || gotProvider != domain.ProviderLima {
+		t.Fatalf("unexpected call args: workdir=%q provider=%q", gotWorkDir, gotProvider)
+	}
+	got := stdout.String()
+	if !bytes.Contains([]byte(got), []byte("== .sandstorm/.generated/lima.yaml ==")) {
+		t.Fatalf("expected lima.yaml section, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("SANDSTORM_EXTERNAL_PORT=6090")) {
+		t.Fatalf("expected runtime.env body, got %q", got)
+	}
+}
+
+func TestRunDevUsesAliasDefaultProvider(t *testing.T) {
+	t.Parallel()
+
+	var gotProvider domain.ProviderName
+	app := &fakeApp{
+		stacks: []string{"node"},
+		dev: func(_ context.Context, _ string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			gotProvider = provider
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "sandstorm-demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program:         "lima-spk",
+		Args:            []string{"dev"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &bytes.Buffer{},
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider != domain.ProviderLima {
+		t.Fatalf("expected alias default provider, got %q", gotProvider)
 	}
 }
 
@@ -127,7 +262,7 @@ func TestRunVMStatusJSONOutput(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"node"},
-		status: func(_ context.Context, workDir string) (providers.Status, error) {
+		status: func(_ context.Context, workDir string, _ domain.ProviderName) (providers.Status, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
@@ -194,7 +329,7 @@ func TestRunDevDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		dev: func(_ context.Context, workDir string) (*domain.ProjectState, error) {
+		dev: func(_ context.Context, workDir string, _ domain.ProviderName) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
@@ -202,7 +337,6 @@ func TestRunDevDispatchesToApp(t *testing.T) {
 				Provider:   domain.ProviderLima,
 				Stack:      "lemp",
 				VMInstance: "sandstorm-app",
-				Migration:  1,
 			}, nil
 		},
 	}
@@ -217,7 +351,7 @@ func TestRunDevDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app migration=1\n" {
+	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
@@ -228,11 +362,11 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		pack: func(_ context.Context, workDir, output string) (*domain.ProjectState, error) {
+		pack: func(_ context.Context, workDir, output string, _ domain.ProviderName) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" || output != "out.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, output)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app", Migration: 1}, nil
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
 		},
 	}
 
@@ -246,7 +380,7 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app migration=1\n" {
+	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
@@ -257,11 +391,11 @@ func TestRunVerifyDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		verify: func(_ context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
+		verify: func(_ context.Context, workDir, spkPath string, _ domain.ProviderName) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" || spkPath != "input.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, spkPath)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderVagrant, Stack: "lemp", VMInstance: "app", Migration: 1}, nil
+			return &domain.ProjectState{Provider: domain.ProviderVagrant, Stack: "lemp", VMInstance: "app"}, nil
 		},
 	}
 
@@ -275,7 +409,7 @@ func TestRunVerifyDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=vagrant stack=lemp vm=app migration=1\n" {
+	if got := stdout.String(); got != "provider=vagrant stack=lemp vm=app\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
@@ -286,11 +420,11 @@ func TestRunPublishDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		publish: func(_ context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
+		publish: func(_ context.Context, workDir, spkPath string, _ domain.ProviderName) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" || spkPath != "input.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, spkPath)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app", Migration: 1}, nil
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
 		},
 	}
 
@@ -304,7 +438,7 @@ func TestRunPublishDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app migration=1\n" {
+	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
@@ -315,7 +449,7 @@ func TestRunKeygenPrintsCommandStdout(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		keygen: func(_ context.Context, workDir string, args []string) (runner.Result, error) {
+		keygen: func(_ context.Context, workDir string, args []string, _ domain.ProviderName) (runner.Result, error) {
 			if workDir != "/workspace/app" || len(args) != 1 || args[0] != "--admin" {
 				t.Fatalf("unexpected args: %q %v", workDir, args)
 			}
@@ -344,7 +478,7 @@ func TestRunListKeysJSONOutput(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		listkeys: func(_ context.Context, workDir string, args []string) (runner.Result, error) {
+		listkeys: func(_ context.Context, workDir string, args []string, _ domain.ProviderName) (runner.Result, error) {
 			if workDir != "/workspace/app" || len(args) != 0 {
 				t.Fatalf("unexpected args: %q %v", workDir, args)
 			}
@@ -381,7 +515,7 @@ func TestRunGetKeyDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		getkey: func(_ context.Context, workDir, keyID string) (runner.Result, error) {
+		getkey: func(_ context.Context, workDir, keyID string, _ domain.ProviderName) (runner.Result, error) {
 			if workDir != "/workspace/app" || keyID != "kid123" {
 				t.Fatalf("unexpected args: %q %q", workDir, keyID)
 			}
@@ -410,11 +544,11 @@ func TestRunEnterGrainDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		enterGrain: func(_ context.Context, workDir string) (*domain.ProjectState, error) {
+		enterGrain: func(_ context.Context, workDir string, _ domain.ProviderName) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app", Migration: 1}, nil
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
 		},
 	}
 
@@ -428,7 +562,7 @@ func TestRunEnterGrainDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app migration=1\n" {
+	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }

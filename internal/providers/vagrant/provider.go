@@ -1,11 +1,13 @@
 package vagrant
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/providers"
@@ -24,14 +26,27 @@ func New(r runner.Runner, repo *templates.Repository) *Provider {
 
 func (p *Provider) Name() domain.ProviderName { return domain.ProviderVagrant }
 
-func (p *Provider) BootstrapFiles(_ providers.ProjectContext) ([]providers.RenderedFile, error) {
+func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers.RenderedFile, error) {
+	if project.Config == nil {
+		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "vagrant.BootstrapFiles", Message: "resolved config is required"}
+	}
 	data, err := p.templates.BoxFile("Vagrantfile")
 	if err != nil {
 		return nil, err
 	}
+	rendered, err := renderTemplate(data, map[string]any{
+		"Box":           project.Config.Vagrant.Box,
+		"ExternalHost":  project.Config.Network.Sandstorm.Host,
+		"GuestPort":     project.Config.Network.Sandstorm.GuestPort,
+		"ExternalPort":  project.Config.Network.Sandstorm.ExternalPort,
+		"LocalhostOnly": project.Config.Network.Sandstorm.LocalhostOnly,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return []providers.RenderedFile{{
-		Path: filepath.Join(".sandstorm", "Vagrantfile"),
-		Body: data,
+		Path: filepath.Join(".sandstorm", ".generated", "Vagrantfile"),
+		Body: rendered,
 		Mode: 0o644,
 	}}, nil
 }
@@ -41,29 +56,29 @@ func (p *Provider) DetectInstanceName(workDir string) string {
 }
 
 func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-up", Command: "vagrant", Args: []string{"up"}, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-up", Command: "vagrant", Args: []string{"up"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated"), Stream: true})
 	return err
 }
 
 func (p *Provider) Halt(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-halt", Command: "vagrant", Args: []string{"halt"}, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-halt", Command: "vagrant", Args: []string{"halt"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 	return err
 }
 
 func (p *Provider) Destroy(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-destroy", Command: "vagrant", Args: []string{"destroy", "-f"}, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-destroy", Command: "vagrant", Args: []string{"destroy", "-f"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 	return err
 }
 
 func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, args []string) error {
 	allArgs := append([]string{"ssh"}, args...)
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-ssh", Command: "vagrant", Args: allArgs, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-ssh", Command: "vagrant", Args: allArgs, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 	return err
 }
 
 func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
 	argv := []string{"ssh", "-c", shellJoin(command)}
-	return p.runner.Run(ctx, runner.Spec{Name: "vagrant-exec", Command: "vagrant", Args: argv, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	return p.runner.Run(ctx, runner.Spec{Name: "vagrant-exec", Command: "vagrant", Args: argv, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 }
 
 func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
@@ -71,7 +86,7 @@ func (p *Provider) ExecInteractive(ctx context.Context, project providers.Projec
 		Name:        "vagrant-exec-interactive",
 		Command:     "vagrant",
 		Args:        []string{"ssh", "-c", shellJoin(command)},
-		Dir:         filepath.Join(project.WorkDir, ".sandstorm"),
+		Dir:         filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 		Interactive: true,
 	})
 	return err
@@ -89,14 +104,14 @@ func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectConte
 		Name:    "vagrant-write-file",
 		Command: "vagrant",
 		Args:    []string{"ssh", "-c", shellJoin(command)},
-		Dir:     filepath.Join(project.WorkDir, ".sandstorm"),
+		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 		Stdin:   file.Body,
 	})
 	return err
 }
 
 func (p *Provider) Provision(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-provision", Command: "vagrant", Args: []string{"provision"}, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-provision", Command: "vagrant", Args: []string{"provision"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated"), Stream: true})
 	return err
 }
 
@@ -105,7 +120,7 @@ func (p *Provider) ListGrains(ctx context.Context, project providers.ProjectCont
 		Name:    "vagrant-list-grains",
 		Command: "vagrant",
 		Args:    []string{"ssh", "-c", `pidof spk || echo no-spk;SANDSTORM_UID=$(id sandstorm | sed -r s,[^0-9],_,g | sed -r s,_+,_,g | cut -d _ -f 2 ) ; for pid in $(pidof supervisor); do echo $pid $(cat /proc/$pid/status | grep -q 'Uid:.*'${SANDSTORM_UID} && echo ownership-correct || echo ownership-wrong) $(xargs -0 -n1 echo < /proc/$pid/cmdline  | grep -v -- - | head -n2 | tail -n1) $(grep -E -l ^PPid:[[:blank:]]*${pid}$ /proc/*/status | head -n1  | sed -r s,/proc/,,g | sed -r s,/status,,) ; done`},
-		Dir:     filepath.Join(project.WorkDir, ".sandstorm"),
+		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 	})
 	if err != nil {
 		return nil, err
@@ -124,7 +139,7 @@ func (p *Provider) AttachGrain(ctx context.Context, project providers.ProjectCon
 		Name:    "vagrant-inject-enter-grain",
 		Command: "vagrant",
 		Args:    []string{"ssh", "-c", inject},
-		Dir:     filepath.Join(project.WorkDir, ".sandstorm"),
+		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 		Stdin:   helper,
 	}); err != nil {
 		return err
@@ -133,14 +148,14 @@ func (p *Provider) AttachGrain(ctx context.Context, project providers.ProjectCon
 		Name:        "vagrant-attach-grain",
 		Command:     "vagrant",
 		Args:        []string{"ssh", "-c", "cd /opt/app/.sandstorm && sudo " + shellQuote(targetBin) + " " + strconv.Itoa(grain.ChildPID)},
-		Dir:         filepath.Join(project.WorkDir, ".sandstorm"),
+		Dir:         filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 		Interactive: true,
 	})
 	return err
 }
 
 func (p *Provider) Status(ctx context.Context, project providers.ProjectContext) (providers.Status, error) {
-	result, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-status", Command: "vagrant", Args: []string{"status", "--machine-readable"}, Dir: filepath.Join(project.WorkDir, ".sandstorm")})
+	result, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-status", Command: "vagrant", Args: []string{"status", "--machine-readable"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 	status := providers.Status{Provider: p.Name(), InstanceName: p.DetectInstanceName(project.WorkDir), State: "unknown"}
 	if err == nil && result.Stdout != "" {
 		status.State = "reported"
@@ -166,6 +181,18 @@ func shellQuote(s string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func renderTemplate(data []byte, values map[string]any) ([]byte, error) {
+	tpl, err := template.New("vagrant").Parse(string(data))
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := tpl.Execute(&out, values); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 var _ providers.Plugin = (*Provider)(nil)

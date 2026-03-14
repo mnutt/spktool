@@ -16,7 +16,6 @@ import (
 	"github.com/mnutt/spktool/internal/providers/vagrant"
 	"github.com/mnutt/spktool/internal/runner"
 	"github.com/mnutt/spktool/internal/services"
-	"github.com/mnutt/spktool/internal/state"
 	"github.com/mnutt/spktool/internal/templates"
 )
 
@@ -43,7 +42,6 @@ func Run(ctx context.Context, argv []string) int {
 		logger,
 		repo,
 		registry,
-		state.New(),
 		keys.NewLocalKeyring(home),
 	)
 
@@ -67,7 +65,7 @@ func detectDefaultProvider(program string) domain.ProviderName {
 	case "lima-spk":
 		return domain.ProviderLima
 	default:
-		return domain.ProviderLima
+		return ""
 	}
 }
 

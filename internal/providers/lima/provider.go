@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -28,15 +29,47 @@ func New(r runner.Runner, repo *templates.Repository) *Provider {
 func (p *Provider) Name() domain.ProviderName { return domain.ProviderLima }
 
 func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers.RenderedFile, error) {
-	body := []byte(fmt.Sprintf(`arch: x86_64
-vmType: qemu
+	if project.Config == nil {
+		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "lima.BootstrapFiles", Message: "resolved config is required"}
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, domain.Wrap(domain.ErrExternal, "lima.BootstrapFiles", "resolve home directory", err)
+	}
+	hostIP := ""
+	if project.Config.Network.Sandstorm.LocalhostOnly {
+		hostIP = "\n    hostIP: 127.0.0.1"
+	}
+	mountType := "reverse-sshfs"
+	if project.Config.Lima.VMType == "vz" {
+		mountType = "virtiofs"
+	}
+	body := []byte(fmt.Sprintf(`arch: %s
+vmType: %s
+mountType: %s
+images:
+  - location: %q
+    arch: %q
+containerd:
+  system: false
+  user: false
 mounts:
   - location: %q
     mountPoint: /opt/app
     writable: true
-`, project.WorkDir))
+  - location: %q
+    mountPoint: /host-dot-sandstorm
+    writable: true
+portForwards:
+  - guestPort: %d
+    hostPort: %d%s
+  - guestIP: "127.0.0.1"
+    proto: "any"
+    guestPortRange: [1, 65535]
+    ignore: true
+`, project.Config.Lima.Arch, project.Config.Lima.VMType, mountType, project.Config.Lima.Image, project.Config.Lima.ImageArch, project.WorkDir, filepath.Join(homeDir, ".sandstorm"), project.Config.Network.Sandstorm.GuestPort, project.Config.Network.Sandstorm.ExternalPort, hostIP))
 	return []providers.RenderedFile{{
-		Path: filepath.Join(".sandstorm", "lima.yaml"),
+		Path: filepath.Join(".sandstorm", ".generated", "lima.yaml"),
 		Body: body,
 		Mode: 0o644,
 	}}, nil
@@ -51,7 +84,12 @@ func (p *Provider) DetectInstanceName(workDir string) string {
 
 func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) error {
 	instance := p.DetectInstanceName(project.WorkDir)
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: []string{"start", "--name", instance, filepath.Join(project.WorkDir, ".sandstorm", "lima.yaml")}})
+	stopTail := func() {}
+	if project.Verbose {
+		stopTail = startSerialTail(instance)
+	}
+	defer stopTail()
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}, Stream: true})
 	return err
 }
 
@@ -103,7 +141,21 @@ func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectConte
 }
 
 func (p *Provider) Provision(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-start-provision", Command: "limactl", Args: []string{"start", "--name", p.DetectInstanceName(project.WorkDir), "--tty=false", filepath.Join(project.WorkDir, ".sandstorm", "lima.yaml")}})
+	_, err := p.runner.Run(ctx, runner.Spec{
+		Name:    "lima-provision",
+		Command: "limactl",
+		Args: []string{
+			"shell",
+			"--workdir",
+			"/opt/app/.sandstorm",
+			p.DetectInstanceName(project.WorkDir),
+			"sudo",
+			"bash",
+			"-lc",
+			"./global-setup.sh && ./setup.sh",
+		},
+		Stream: true,
+	})
 	return err
 }
 

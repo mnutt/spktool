@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha1"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,11 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mnutt/spktool/internal/config"
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/keys"
 	"github.com/mnutt/spktool/internal/providers"
 	"github.com/mnutt/spktool/internal/runner"
-	"github.com/mnutt/spktool/internal/state"
 	"github.com/mnutt/spktool/internal/templates"
 	"github.com/mnutt/spktool/internal/workflow"
 )
@@ -26,39 +27,63 @@ type ProjectService struct {
 	logger    *slog.Logger
 	templates *templates.Repository
 	providers *providers.Registry
-	state     *state.Store
 	keyring   keys.Manager
 }
 
-func NewProjectService(logger *slog.Logger, repo *templates.Repository, registry *providers.Registry, store *state.Store, keyring keys.Manager) *ProjectService {
+type ConfigRender struct {
+	Provider domain.ProviderName `json:"provider"`
+	Files    []ConfigRenderFile  `json:"files"`
+}
+
+type ConfigRenderFile struct {
+	Path string `json:"path"`
+	Body string `json:"body"`
+}
+
+func NewProjectService(logger *slog.Logger, repo *templates.Repository, registry *providers.Registry, keyring keys.Manager) *ProjectService {
 	return &ProjectService{
 		logger:    logger,
 		templates: repo,
 		providers: registry,
-		state:     store,
 		keyring:   keyring,
 	}
 }
 
-func (s *ProjectService) SetupVM(ctx context.Context, workDir string, providerName domain.ProviderName, stack string) (*domain.ProjectState, error) {
-	plugin, err := s.providers.Plugin(providerName)
-	if err != nil {
-		return nil, err
-	}
+func (s *ProjectService) SetupVM(ctx context.Context, workDir string, providerName domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
 	if stack == "" {
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.SetupVM", Message: "stack is required"}
 	}
 	if _, err := s.templates.StackFile(stack, "setup.sh"); err != nil {
 		return nil, &domain.Error{Code: domain.ErrNotFound, Op: "services.SetupVM", Message: fmt.Sprintf("unknown stack %q", stack), Cause: err}
 	}
-
-	project := providers.ProjectContext{WorkDir: workDir}
-	stateFile := &domain.ProjectState{
-		Provider:    providerName,
-		VMInstance:  plugin.DetectInstanceName(workDir),
-		Stack:       stack,
-		ToolVersion: ToolVersion,
-		Migration:   1,
+	if providerName == "" {
+		providerName = config.DetectProvider("")
+	}
+	if providerName == "" {
+		return nil, &domain.Error{Code: domain.ErrNotFound, Op: "services.SetupVM", Message: "provider is not configured and could not be autodetected"}
+	}
+	localConfigExists := false
+	if !force {
+		projectPath := filepath.Join(workDir, ".sandstorm", config.ProjectFile)
+		if _, err := os.Stat(projectPath); err == nil {
+			return nil, &domain.Error{
+				Code:    domain.ErrConflict,
+				Op:      "services.SetupVM",
+				Message: fmt.Sprintf(".sandstorm/%s already exists; rerun with --force to overwrite", config.ProjectFile),
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, domain.Wrap(domain.ErrExternal, "services.SetupVM", "read existing project config", err)
+		}
+	}
+	localPath := filepath.Join(workDir, ".sandstorm", config.LocalFile)
+	if _, err := os.Stat(localPath); err == nil {
+		localConfigExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, domain.Wrap(domain.ErrExternal, "services.SetupVM", "read existing local config", err)
+	}
+	plugin, err := s.providers.Plugin(providerName)
+	if err != nil {
+		return nil, err
 	}
 
 	globalSetup, err := s.templates.BoxFile("global-setup.sh")
@@ -89,21 +114,22 @@ func (s *ProjectService) SetupVM(ctx context.Context, workDir string, providerNa
 	if err != nil {
 		return nil, err
 	}
-	bootstrapFiles, err := plugin.BootstrapFiles(project)
-	if err != nil {
-		return nil, err
-	}
-
-	files := []providers.RenderedFile{
+	projectFiles := []providers.RenderedFile{
+		{Path: filepath.Join(".sandstorm", config.ProjectFile), Body: config.InitialProject(stack), Mode: 0o644},
 		{Path: filepath.Join(".sandstorm", "global-setup.sh"), Body: globalSetup, Mode: 0o755},
 		{Path: filepath.Join(".sandstorm", "setup.sh"), Body: setup, Mode: 0o755},
 		{Path: filepath.Join(".sandstorm", "build.sh"), Body: build, Mode: 0o755},
 		{Path: filepath.Join(".sandstorm", "launcher.sh"), Body: launcher, Mode: 0o755},
 		{Path: filepath.Join(".sandstorm", ".gitignore"), Body: gitIgnore, Mode: 0o644},
 		{Path: filepath.Join(".sandstorm", ".gitattributes"), Body: gitAttributes, Mode: 0o644},
-		{Path: filepath.Join(".sandstorm", "stack"), Body: []byte(stack + "\n"), Mode: 0o644},
 	}
-	files = append(files, bootstrapFiles...)
+	if force || !localConfigExists {
+		projectFiles = append(projectFiles, providers.RenderedFile{
+			Path: filepath.Join(".sandstorm", config.LocalFile),
+			Body: config.InitialLocal(providerName),
+			Mode: 0o644,
+		})
+	}
 
 	err = workflow.Run(ctx, "setupvm", []workflow.Step{
 		{
@@ -117,9 +143,9 @@ func (s *ProjectService) SetupVM(ctx context.Context, workDir string, providerNa
 			},
 		},
 		{
-			Name: "write-project-assets",
+			Name: "write-project-config",
 			Do: func(context.Context) error {
-				for _, file := range files {
+				for _, file := range projectFiles {
 					full := filepath.Join(workDir, file.Path)
 					if err := os.WriteFile(full, file.Body, os.FileMode(file.Mode)); err != nil {
 						return domain.Wrap(domain.ErrExternal, "services.SetupVM", "write project asset", err)
@@ -128,66 +154,80 @@ func (s *ProjectService) SetupVM(ctx context.Context, workDir string, providerNa
 				return nil
 			},
 		},
-		{
-			Name: "save-project-state",
-			Do: func(context.Context) error {
-				return s.state.Save(ctx, workDir, stateFile)
-			},
-		},
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, "")
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.generatedFiles(workDir, projectState, resolved, plugin)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.writeFiles(workDir, files); err != nil {
+		return nil, err
+	}
+
 	s.logger.Info("project initialized", "provider", providerName, "stack", stack, "workdir", workDir)
-	return stateFile, nil
+	return projectState, nil
 }
 
-func (s *ProjectService) UpgradeVM(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) UpgradeVM(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
+	if err != nil {
+		var configErr *domain.Error
+		if !errors.As(err, &configErr) || configErr.Code != domain.ErrNotFound {
+			return nil, err
+		}
+		if err := s.migrateLegacyProject(workDir, providerOverride); err != nil {
+			return nil, err
+		}
+		projectState, resolved, plugin, err = s.loadProject(ctx, workDir, providerOverride)
+		if err != nil {
+			return nil, err
+		}
+	}
+	files, err := s.generatedFiles(workDir, projectState, resolved, plugin)
 	if err != nil {
 		return nil, err
 	}
-	bootstrapFiles, err := plugin.BootstrapFiles(providers.ProjectContext{WorkDir: workDir, State: projectState})
-	if err != nil {
-		return nil, err
-	}
-	globalSetup, err := s.templates.BoxFile("global-setup.sh")
-	if err != nil {
-		return nil, err
-	}
-
-	files := []providers.RenderedFile{
-		{Path: filepath.Join(".sandstorm", "global-setup.sh"), Body: globalSetup, Mode: 0o755},
-	}
-	files = append(files, bootstrapFiles...)
-
-	if err := workflow.Run(ctx, "upgradevm", []workflow.Step{{
-		Name: "refresh-provider-assets",
-		Do: func(context.Context) error {
-			for _, file := range files {
-				full := filepath.Join(workDir, file.Path)
-				if err := os.WriteFile(full, file.Body, os.FileMode(file.Mode)); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-	}, {
-		Name: "save-project-state",
-		Do: func(context.Context) error {
-			projectState.ToolVersion = ToolVersion
-			projectState.Migration++
-			return s.state.Save(ctx, workDir, projectState)
-		},
-	}}); err != nil {
+	if err := s.writeFiles(workDir, files); err != nil {
 		return nil, err
 	}
 	return projectState, nil
 }
 
-func (s *ProjectService) Init(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) RenderConfig(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*ConfigRender, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.generatedFiles(workDir, projectState, resolved, plugin)
+	if err != nil {
+		return nil, err
+	}
+
+	rendered := &ConfigRender{
+		Provider: projectState.Provider,
+		Files:    make([]ConfigRenderFile, 0, len(files)),
+	}
+	for _, file := range files {
+		if !strings.HasPrefix(filepath.ToSlash(file.Path), ".sandstorm/.generated/") {
+			continue
+		}
+		rendered.Files = append(rendered.Files, ConfigRenderFile{
+			Path: filepath.ToSlash(file.Path),
+			Body: string(file.Body),
+		})
+	}
+	return rendered, nil
+}
+
+func (s *ProjectService) Init(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -201,14 +241,14 @@ func (s *ProjectService) Init(ctx context.Context, workDir string) (*domain.Proj
 		command = append(command, strings.Fields(initArgs)...)
 	}
 	command = append(command, "--", "/bin/bash", "/opt/app/.sandstorm/launcher.sh")
-	if _, err := plugin.Exec(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}, command); err != nil {
+	if _, err := plugin.Exec(ctx, s.projectContext(workDir, projectState, resolved), command); err != nil {
 		return nil, err
 	}
 	return projectState, nil
 }
 
-func (s *ProjectService) Dev(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) Dev(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +263,7 @@ func (s *ProjectService) Dev(ctx context.Context, workDir string) (*domain.Proje
 		return nil, err
 	}
 
-	project := providers.ProjectContext{WorkDir: workDir, State: projectState}
+	project := s.projectContext(workDir, projectState, resolved)
 	err = workflow.Run(ctx, "dev", []workflow.Step{
 		{
 			Name: "upload-grain-log-tailer",
@@ -258,8 +298,8 @@ func (s *ProjectService) Dev(ctx context.Context, workDir string) (*domain.Proje
 	return projectState, nil
 }
 
-func (s *ProjectService) Pack(ctx context.Context, workDir, outputPath string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) Pack(ctx context.Context, workDir, outputPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +307,7 @@ func (s *ProjectService) Pack(ctx context.Context, workDir, outputPath string) (
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Pack", Message: "output path is required"}
 	}
 
-	project := providers.ProjectContext{WorkDir: workDir, State: projectState}
+	project := s.projectContext(workDir, projectState, resolved)
 	hostArtifact := filepath.Join(workDir, "sandstorm-package.spk")
 	guestArtifact := "/tmp/sandstorm-package.spk"
 	if projectState.Provider == domain.ProviderVagrant {
@@ -313,8 +353,8 @@ func (s *ProjectService) Pack(ctx context.Context, workDir, outputPath string) (
 	return projectState, nil
 }
 
-func (s *ProjectService) Verify(ctx context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) Verify(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +362,7 @@ func (s *ProjectService) Verify(ctx context.Context, workDir, spkPath string) (*
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Verify", Message: "spk path is required"}
 	}
 
-	project := providers.ProjectContext{WorkDir: workDir, State: projectState}
+	project := s.projectContext(workDir, projectState, resolved)
 	stagedName := filepath.Base(spkPath)
 	stagedHostPath := filepath.Join(workDir, ".sandstorm", stagedName)
 	stagedGuestPath := filepath.ToSlash(filepath.Join("/opt/app/.sandstorm", stagedName))
@@ -363,8 +403,8 @@ func (s *ProjectService) Verify(ctx context.Context, workDir, spkPath string) (*
 	return projectState, nil
 }
 
-func (s *ProjectService) Publish(ctx context.Context, workDir, spkPath string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) Publish(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +412,7 @@ func (s *ProjectService) Publish(ctx context.Context, workDir, spkPath string) (
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Publish", Message: "spk path is required"}
 	}
 
-	project := providers.ProjectContext{WorkDir: workDir, State: projectState}
+	project := s.projectContext(workDir, projectState, resolved)
 	stagedName := filepath.Base(spkPath)
 	stagedHostPath := filepath.Join(workDir, ".sandstorm", stagedName)
 	stagedGuestPath := filepath.ToSlash(filepath.Join("/opt/app/.sandstorm", stagedName))
@@ -417,8 +457,8 @@ func (s *ProjectService) Publish(ctx context.Context, workDir, spkPath string) (
 	return projectState, nil
 }
 
-func (s *ProjectService) EnterGrain(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) EnterGrain(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +480,7 @@ func (s *ProjectService) EnterGrain(ctx context.Context, workDir string) (*domai
 			return nil, &domain.Error{Code: domain.ErrConflict, Op: "services.EnterGrain", Message: "embedded enter_grain helper checksum mismatch"}
 		}
 	}
-	project := providers.ProjectContext{WorkDir: workDir, State: projectState}
+	project := s.projectContext(workDir, projectState, resolved)
 	grains, err := plugin.ListGrains(ctx, project)
 	if err != nil {
 		return nil, err
@@ -455,27 +495,27 @@ func (s *ProjectService) EnterGrain(ctx context.Context, workDir string) (*domai
 	return projectState, nil
 }
 
-func (s *ProjectService) Keygen(ctx context.Context, workDir string, args []string) (runner.Result, error) {
-	return s.runKeyCommand(ctx, workDir, append([]string{"spk", "keygen", "--keyring=/host-dot-sandstorm/sandstorm-keyring"}, args...))
+func (s *ProjectService) Keygen(ctx context.Context, workDir string, args []string, providerOverride domain.ProviderName) (runner.Result, error) {
+	return s.runKeyCommand(ctx, workDir, providerOverride, append([]string{"spk", "keygen", "--keyring=/host-dot-sandstorm/sandstorm-keyring"}, args...))
 }
 
-func (s *ProjectService) ListKeys(ctx context.Context, workDir string, args []string) (runner.Result, error) {
-	return s.runKeyCommand(ctx, workDir, append([]string{"spk", "listkeys", "--keyring=/host-dot-sandstorm/sandstorm-keyring"}, args...))
+func (s *ProjectService) ListKeys(ctx context.Context, workDir string, args []string, providerOverride domain.ProviderName) (runner.Result, error) {
+	return s.runKeyCommand(ctx, workDir, providerOverride, append([]string{"spk", "listkeys", "--keyring=/host-dot-sandstorm/sandstorm-keyring"}, args...))
 }
 
-func (s *ProjectService) GetKey(ctx context.Context, workDir, keyID string) (runner.Result, error) {
+func (s *ProjectService) GetKey(ctx context.Context, workDir, keyID string, providerOverride domain.ProviderName) (runner.Result, error) {
 	if keyID == "" {
 		return runner.Result{}, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.GetKey", Message: "key id is required"}
 	}
-	return s.runKeyCommand(ctx, workDir, []string{"spk", "getkey", "--keyring=/host-dot-sandstorm/sandstorm-keyring", keyID})
+	return s.runKeyCommand(ctx, workDir, providerOverride, []string{"spk", "getkey", "--keyring=/host-dot-sandstorm/sandstorm-keyring", keyID})
 }
 
-func (s *ProjectService) VMUp(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMUp(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
-	if err := plugin.Up(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}); err != nil {
+	if err := plugin.Up(ctx, s.projectContext(workDir, projectState, resolved)); err != nil {
 		return nil, err
 	}
 	return projectState, nil
@@ -491,53 +531,53 @@ func (s *ProjectService) devCommand(provider domain.ProviderName, wrapperPath st
 	}
 }
 
-func (s *ProjectService) VMHalt(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMHalt(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
-	if err := plugin.Halt(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}); err != nil {
+	if err := plugin.Halt(ctx, s.projectContext(workDir, projectState, resolved)); err != nil {
 		return nil, err
 	}
 	return projectState, nil
 }
 
-func (s *ProjectService) VMDestroy(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMDestroy(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
-	if err := plugin.Destroy(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}); err != nil {
+	if err := plugin.Destroy(ctx, s.projectContext(workDir, projectState, resolved)); err != nil {
 		return nil, err
 	}
 	return projectState, nil
 }
 
-func (s *ProjectService) VMStatus(ctx context.Context, workDir string) (providers.Status, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMStatus(ctx context.Context, workDir string, providerOverride domain.ProviderName) (providers.Status, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return providers.Status{}, err
 	}
-	return plugin.Status(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState})
+	return plugin.Status(ctx, s.projectContext(workDir, projectState, resolved))
 }
 
-func (s *ProjectService) VMProvision(ctx context.Context, workDir string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMProvision(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
-	if err := plugin.Provision(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}); err != nil {
+	if err := plugin.Provision(ctx, s.projectContext(workDir, projectState, resolved)); err != nil {
 		return nil, err
 	}
 	return projectState, nil
 }
 
-func (s *ProjectService) VMSSH(ctx context.Context, workDir string, args []string) (*domain.ProjectState, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) VMSSH(ctx context.Context, workDir string, args []string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
-	if err := plugin.SSH(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}, args); err != nil {
+	if err := plugin.SSH(ctx, s.projectContext(workDir, projectState, resolved), args); err != nil {
 		return nil, err
 	}
 	return projectState, nil
@@ -547,31 +587,49 @@ func (s *ProjectService) StackNames() ([]string, error) {
 	return s.templates.StackNames()
 }
 
-func (s *ProjectService) loadProject(ctx context.Context, workDir string) (*domain.ProjectState, providers.Plugin, error) {
-	projectState, err := s.state.Load(ctx, workDir)
+func (s *ProjectService) loadProject(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, *config.Resolved, providers.Plugin, error) {
+	resolved, err := config.Load(workDir, providerOverride, "")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if projectState == nil {
-		projectState, err = s.inferLegacyProject(ctx, workDir)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	plugin, err := s.providers.Plugin(projectState.Provider)
+	plugin, err := s.providers.Plugin(resolved.Provider)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return projectState, plugin, nil
+	return summarizeProject(plugin, workDir, resolved), resolved, plugin, nil
 }
 
-func (s *ProjectService) inferLegacyProject(ctx context.Context, workDir string) (*domain.ProjectState, error) {
+func (s *ProjectService) migrateLegacyProject(workDir string, providerOverride domain.ProviderName) error {
+	projectState, err := legacyProjectState(workDir, providerOverride)
+	if err != nil {
+		return err
+	}
+	files := []providers.RenderedFile{{
+		Path: filepath.Join(".sandstorm", config.ProjectFile),
+		Body: config.InitialProject(projectState.Stack),
+		Mode: 0o644,
+	}}
+	localPath := filepath.Join(workDir, ".sandstorm", config.LocalFile)
+	if _, err := os.Stat(localPath); err == nil {
+		return s.writeFiles(workDir, files)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return domain.Wrap(domain.ErrExternal, "services.migrateLegacyProject", "read local config", err)
+	}
+	files = append(files, providers.RenderedFile{
+		Path: filepath.Join(".sandstorm", config.LocalFile),
+		Body: config.InitialLocal(projectState.Provider),
+		Mode: 0o644,
+	})
+	return s.writeFiles(workDir, files)
+}
+
+func legacyProjectState(workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
 	sandstormDir := filepath.Join(workDir, ".sandstorm")
 	if stat, err := os.Stat(sandstormDir); err != nil || !stat.IsDir() {
 		return nil, &domain.Error{
 			Code:    domain.ErrNotFound,
-			Op:      "services.inferLegacyProject",
-			Message: "no .sandstorm project state found; run setupvm first",
+			Op:      "services.legacyProjectState",
+			Message: "no .sandstorm project config found; run setupvm first",
 			Cause:   err,
 		}
 	}
@@ -580,7 +638,7 @@ func (s *ProjectService) inferLegacyProject(ctx context.Context, workDir string)
 	if err != nil {
 		return nil, &domain.Error{
 			Code:    domain.ErrNotFound,
-			Op:      "services.inferLegacyProject",
+			Op:      "services.legacyProjectState",
 			Message: "legacy .sandstorm project is missing stack metadata",
 			Cause:   err,
 		}
@@ -589,44 +647,35 @@ func (s *ProjectService) inferLegacyProject(ctx context.Context, workDir string)
 	if stack == "" {
 		return nil, &domain.Error{
 			Code:    domain.ErrNotFound,
-			Op:      "services.inferLegacyProject",
+			Op:      "services.legacyProjectState",
 			Message: "legacy .sandstorm project has an empty stack marker",
 		}
 	}
 
 	providerName := inferProviderFromLegacyFiles(sandstormDir)
+	if providerOverride != "" {
+		providerName = providerOverride
+	}
 	if providerName == "" {
 		return nil, &domain.Error{
 			Code:    domain.ErrNotFound,
-			Op:      "services.inferLegacyProject",
+			Op:      "services.legacyProjectState",
 			Message: "legacy .sandstorm project is missing provider metadata",
 		}
 	}
-	plugin, err := s.providers.Plugin(providerName)
-	if err != nil {
-		return nil, err
-	}
-
-	projectState := &domain.ProjectState{
+	return &domain.ProjectState{
 		Provider:    providerName,
-		VMInstance:  plugin.DetectInstanceName(workDir),
 		Stack:       stack,
 		ToolVersion: ToolVersion,
-		Migration:   1,
-	}
-	if err := s.state.Save(ctx, workDir, projectState); err != nil {
-		return nil, err
-	}
-	s.logger.Info("migrated legacy project state", "provider", providerName, "stack", stack, "workdir", workDir)
-	return projectState, nil
+	}, nil
 }
 
-func (s *ProjectService) runKeyCommand(ctx context.Context, workDir string, command []string) (runner.Result, error) {
-	projectState, plugin, err := s.loadProject(ctx, workDir)
+func (s *ProjectService) runKeyCommand(ctx context.Context, workDir string, providerOverride domain.ProviderName, command []string) (runner.Result, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return runner.Result{}, err
 	}
-	return plugin.Exec(ctx, providers.ProjectContext{WorkDir: workDir, State: projectState}, command)
+	return plugin.Exec(ctx, s.projectContext(workDir, projectState, resolved), command)
 }
 
 func (s *ProjectService) initArgs(stack string) string {
@@ -635,6 +684,82 @@ func (s *ProjectService) initArgs(stack string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func (s *ProjectService) generatedFiles(workDir string, projectState *domain.ProjectState, resolved *config.Resolved, plugin providers.Plugin) ([]providers.RenderedFile, error) {
+	globalSetup, err := s.templates.BoxFile("global-setup.sh")
+	if err != nil {
+		return nil, err
+	}
+	gitIgnore, err := s.templates.BoxFile("gitignore")
+	if err != nil {
+		return nil, err
+	}
+	gitAttributes, err := s.templates.BoxFile("gitattributes")
+	if err != nil {
+		return nil, err
+	}
+	bootstrapFiles, err := plugin.BootstrapFiles(s.projectContext(workDir, projectState, resolved))
+	if err != nil {
+		return nil, err
+	}
+
+	files := []providers.RenderedFile{
+		{Path: filepath.Join(".sandstorm", "global-setup.sh"), Body: globalSetup, Mode: 0o755},
+		{Path: filepath.Join(".sandstorm", ".gitignore"), Body: gitIgnore, Mode: 0o644},
+		{Path: filepath.Join(".sandstorm", ".gitattributes"), Body: gitAttributes, Mode: 0o644},
+	}
+	if resolved != nil {
+		files = append(files, providers.RenderedFile{
+			Path: filepath.Join(".sandstorm", ".generated", "runtime.env"),
+			Body: renderRuntimeEnv(resolved),
+			Mode: 0o644,
+		})
+	}
+	files = append(files, bootstrapFiles...)
+	return files, nil
+}
+
+func (s *ProjectService) writeFiles(workDir string, files []providers.RenderedFile) error {
+	for _, file := range files {
+		full := filepath.Join(workDir, file.Path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return domain.Wrap(domain.ErrExternal, "services.writeFiles", "create generated file directory", err)
+		}
+		if err := os.WriteFile(full, file.Body, os.FileMode(file.Mode)); err != nil {
+			return domain.Wrap(domain.ErrExternal, "services.writeFiles", "write generated file", err)
+		}
+	}
+	return nil
+}
+
+func summarizeProject(plugin providers.Plugin, workDir string, resolved *config.Resolved) *domain.ProjectState {
+	return &domain.ProjectState{
+		Provider:    resolved.Provider,
+		VMInstance:  plugin.DetectInstanceName(workDir),
+		Stack:       resolved.Stack,
+		ToolVersion: ToolVersion,
+	}
+}
+
+func (s *ProjectService) projectContext(workDir string, state *domain.ProjectState, resolved *config.Resolved) providers.ProjectContext {
+	return providers.ProjectContext{
+		WorkDir: workDir,
+		State:   state,
+		Config:  resolved,
+		Verbose: s.logger.Enabled(context.Background(), slog.LevelDebug),
+	}
+}
+
+func renderRuntimeEnv(resolved *config.Resolved) []byte {
+	return []byte(fmt.Sprintf("SANDSTORM_HOST=%s\nSANDSTORM_EXTERNAL_PORT=%d\nSANDSTORM_GUEST_PORT=%d\nSANDSTORM_BASE_URL=http://%s:%d\nSANDSTORM_WILDCARD_HOST=%s\n",
+		resolved.Network.Sandstorm.Host,
+		resolved.Network.Sandstorm.ExternalPort,
+		resolved.Network.Sandstorm.GuestPort,
+		resolved.Network.Sandstorm.Host,
+		resolved.Network.Sandstorm.ExternalPort,
+		config.WildcardHost(resolved.Network.Sandstorm.Host),
+	))
 }
 
 func copyFile(src, dst string) error {
@@ -707,13 +832,23 @@ func chooseGrain(grains []providers.Grain) (providers.Grain, error) {
 }
 
 func inferProviderFromLegacyFiles(sandstormDir string) domain.ProviderName {
-	vagrantfile := filepath.Join(sandstormDir, "Vagrantfile")
-	limaYAML := filepath.Join(sandstormDir, "lima.yaml")
-	if _, err := os.Stat(vagrantfile); err == nil {
-		return domain.ProviderVagrant
+	vagrantPaths := []string{
+		filepath.Join(sandstormDir, "Vagrantfile"),
+		filepath.Join(sandstormDir, ".generated", "Vagrantfile"),
 	}
-	if _, err := os.Stat(limaYAML); err == nil {
-		return domain.ProviderLima
+	for _, vagrantfile := range vagrantPaths {
+		if _, err := os.Stat(vagrantfile); err == nil {
+			return domain.ProviderVagrant
+		}
+	}
+	limaPaths := []string{
+		filepath.Join(sandstormDir, "lima.yaml"),
+		filepath.Join(sandstormDir, ".generated", "lima.yaml"),
+	}
+	for _, limaYAML := range limaPaths {
+		if _, err := os.Stat(limaYAML); err == nil {
+			return domain.ProviderLima
+		}
 	}
 	return ""
 }

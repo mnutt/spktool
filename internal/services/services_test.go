@@ -2,6 +2,7 @@ package services_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -9,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mnutt/spktool/internal/config"
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/keys"
 	"github.com/mnutt/spktool/internal/providers"
 	"github.com/mnutt/spktool/internal/runner"
 	"github.com/mnutt/spktool/internal/services"
-	"github.com/mnutt/spktool/internal/state"
 	"github.com/mnutt/spktool/internal/templates"
 )
 
@@ -87,7 +88,6 @@ func newService(t *testing.T, plugin providers.Plugin, home string) *services.Pr
 		logger,
 		templates.New(),
 		providers.NewRegistry(plugin),
-		state.New(),
 		keys.NewLocalKeyring(home),
 	)
 }
@@ -108,7 +108,7 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	st, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor")
+	st, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,15 +118,16 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 	}
 
 	wantFiles := []string{
+		filepath.Join(workDir, ".sandstorm", config.ProjectFile),
+		filepath.Join(workDir, ".sandstorm", config.LocalFile),
 		filepath.Join(workDir, ".sandstorm", "global-setup.sh"),
 		filepath.Join(workDir, ".sandstorm", "setup.sh"),
 		filepath.Join(workDir, ".sandstorm", "build.sh"),
 		filepath.Join(workDir, ".sandstorm", "launcher.sh"),
 		filepath.Join(workDir, ".sandstorm", ".gitignore"),
 		filepath.Join(workDir, ".sandstorm", ".gitattributes"),
-		filepath.Join(workDir, ".sandstorm", "stack"),
+		filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env"),
 		filepath.Join(workDir, ".sandstorm", "provider-test.txt"),
-		filepath.Join(workDir, ".sandstorm", state.FileName),
 		filepath.Join(home, ".sandstorm", "sandstorm-keyring"),
 	}
 	for _, path := range wantFiles {
@@ -135,20 +136,124 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 		}
 	}
 
-	stackData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "stack"))
+	stackData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(stackData); got != "meteor\n" {
-		t.Fatalf("unexpected stack marker: %q", got)
+	if got := string(stackData); !strings.Contains(got, `stack = "meteor"`) {
+		t.Fatalf("unexpected project config: %q", got)
 	}
 
-	loaded, err := state.New().Load(context.Background(), workDir)
+	loaded, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded == nil || loaded.Provider != domain.ProviderLima || loaded.VMInstance != "sandstorm-app-1234" {
-		t.Fatalf("unexpected loaded state: %+v", loaded)
+	if got := string(loaded); !strings.Contains(got, `provider = "lima"`) {
+		t.Fatalf("unexpected local config: %q", got)
+	}
+}
+
+func TestSetupVMFailsIfProjectConfigAlreadyExistsWithoutForce(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+	}
+	svc := newService(t, plugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), []byte("stack = \"lemp\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", false)
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected domain error, got %T", err)
+	}
+	if domainErr.Code != domain.ErrConflict {
+		t.Fatalf("unexpected error: %+v", domainErr)
+	}
+}
+
+func TestSetupVMForceOverwritesProjectAndLocalConfig(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+	}
+	svc := newService(t, plugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), []byte("stack = \"lemp\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), []byte("provider = \"vagrant\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", true); err != nil {
+		t.Fatal(err)
+	}
+
+	projectData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(projectData); !strings.Contains(got, `stack = "meteor"`) {
+		t.Fatalf("unexpected project config: %q", got)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(localData); !strings.Contains(got, `provider = "lima"`) {
+		t.Fatalf("unexpected local config: %q", got)
+	}
+}
+
+func TestSetupVMPreservesExistingLocalConfigWithoutForce(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderVagrant,
+		detectInstance: "sandstorm-app-1234",
+	}
+	svc := newService(t, plugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), []byte("provider = \"vagrant\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "meteor", false); err != nil {
+		t.Fatal(err)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(localData); !strings.Contains(got, `provider = "vagrant"`) {
+		t.Fatalf("expected local config to be preserved, got %q", got)
 	}
 }
 
@@ -163,11 +268,11 @@ func TestInitBuildsSPKCommandWithStackInitArgs(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", false); err != nil {
 		t.Fatal(err)
 	}
 
-	st, err := svc.Init(context.Background(), workDir)
+	st, err := svc.Init(context.Background(), workDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +301,56 @@ func TestInitBuildsSPKCommandWithStackInitArgs(t *testing.T) {
 	}
 }
 
-func TestUpgradeVMBumpsMigrationAndRewritesBootstrapFiles(t *testing.T) {
+func TestRenderConfigReturnsGeneratedArtifacts(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-node-9999",
+		bootstrapFiles: []providers.RenderedFile{
+			{
+				Path: filepath.Join(".sandstorm", ".generated", "lima.yaml"),
+				Body: []byte("vmType: vz\n"),
+				Mode: 0o644,
+			},
+			{
+				Path: filepath.Join(".sandstorm", "provider-file.txt"),
+				Body: []byte("ignore me\n"),
+				Mode: 0o644,
+			},
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", false); err != nil {
+		t.Fatal(err)
+	}
+
+	rendered, err := svc.RenderConfig(context.Background(), workDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rendered.Provider != domain.ProviderLima {
+		t.Fatalf("unexpected provider: %+v", rendered)
+	}
+	if len(rendered.Files) != 2 {
+		t.Fatalf("expected runtime.env and lima.yaml, got %+v", rendered.Files)
+	}
+	if rendered.Files[0].Path != ".sandstorm/.generated/runtime.env" {
+		t.Fatalf("expected runtime.env first, got %+v", rendered.Files)
+	}
+	if !strings.Contains(rendered.Files[0].Body, "SANDSTORM_EXTERNAL_PORT=6090") {
+		t.Fatalf("unexpected runtime.env body: %q", rendered.Files[0].Body)
+	}
+	if rendered.Files[1].Path != ".sandstorm/.generated/lima.yaml" || rendered.Files[1].Body != "vmType: vz\n" {
+		t.Fatalf("unexpected provider render: %+v", rendered.Files[1])
+	}
+}
+
+func TestUpgradeVMRewritesBootstrapFiles(t *testing.T) {
 	t.Parallel()
 
 	workDir := t.TempDir()
@@ -212,12 +366,12 @@ func TestUpgradeVMBumpsMigrationAndRewritesBootstrapFiles(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	st, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp")
+	st, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Migration != 1 {
-		t.Fatalf("initial migration = %d", st.Migration)
+	if st.Provider != domain.ProviderVagrant {
+		t.Fatalf("unexpected initial state: %+v", st)
 	}
 
 	plugin.bootstrapFiles = []providers.RenderedFile{{
@@ -225,12 +379,12 @@ func TestUpgradeVMBumpsMigrationAndRewritesBootstrapFiles(t *testing.T) {
 		Body: []byte("v2\n"),
 		Mode: 0o644,
 	}}
-	st, err = svc.UpgradeVM(context.Background(), workDir)
+	st, err = svc.UpgradeVM(context.Background(), workDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Migration != 2 {
-		t.Fatalf("expected migration 2, got %d", st.Migration)
+	if st.Provider != domain.ProviderVagrant {
+		t.Fatalf("unexpected provider after upgrade: %+v", st)
 	}
 
 	data, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "provider-file.txt"))
@@ -239,6 +393,53 @@ func TestUpgradeVMBumpsMigrationAndRewritesBootstrapFiles(t *testing.T) {
 	}
 	if string(data) != "v2\n" {
 		t.Fatalf("unexpected provider file contents: %q", string(data))
+	}
+
+	runtimeEnv, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtimeEnv), "SANDSTORM_GUEST_PORT=6090") {
+		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
+	}
+}
+
+func TestUpgradeVMLegacyProjectWritesRuntimeEnv(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderVagrant,
+		detectInstance: "legacy-vagrant-instance",
+		bootstrapFiles: []providers.RenderedFile{{
+			Path: filepath.Join(".sandstorm", ".generated", "Vagrantfile"),
+			Body: []byte("Vagrant.configure(\"2\") do |config|\nend\n"),
+			Mode: 0o644,
+		}},
+	}
+	svc := newService(t, plugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "stack"), []byte("lemp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "Vagrantfile"), []byte("Vagrant.configure(\"2\") do |config|\nend\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.UpgradeVM(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeEnv, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtimeEnv), "SANDSTORM_BASE_URL=http://local.sandstorm.io:6090") {
+		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
 	}
 }
 
@@ -253,10 +454,10 @@ func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Dev(context.Background(), workDir); err != nil {
+	if _, err := svc.Dev(context.Background(), workDir, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,11 +496,11 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Pack(context.Background(), workDir, outputPath); err != nil {
+	if _, err := svc.Pack(context.Background(), workDir, outputPath, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -328,14 +529,14 @@ func TestVerifyStagesPackageRunsGuestVerifyAndCleansUp(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(input, []byte("verify-me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Verify(context.Background(), workDir, input); err != nil {
+	if _, err := svc.Verify(context.Background(), workDir, input, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -360,14 +561,14 @@ func TestPublishStagesPackageRunsGuestPublishAndCleansUp(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(input, []byte("publish-me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Publish(context.Background(), workDir, input); err != nil {
+	if _, err := svc.Publish(context.Background(), workDir, input, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -392,10 +593,10 @@ func TestKeygenRunsSPKInsideGuest(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.Keygen(context.Background(), workDir, []string{"--admin"})
+	result, err := svc.Keygen(context.Background(), workDir, []string{"--admin"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,10 +621,10 @@ func TestListKeysRunsSPKInsideGuest(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.ListKeys(context.Background(), workDir, nil)
+	result, err := svc.ListKeys(context.Background(), workDir, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,13 +649,13 @@ func TestGetKeyRequiresKeyIDAndRunsSPKInsideGuest(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.GetKey(context.Background(), workDir, ""); err == nil {
+	if _, err := svc.GetKey(context.Background(), workDir, "", ""); err == nil {
 		t.Fatal("expected missing key id error")
 	}
-	result, err := svc.GetKey(context.Background(), workDir, "kid123")
+	result, err := svc.GetKey(context.Background(), workDir, "kid123", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,10 +684,10 @@ func TestEnterGrainChoosesSingleGrainAndAttaches(t *testing.T) {
 	}
 	svc := newService(t, plugin, home)
 
-	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp"); err != nil {
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.EnterGrain(context.Background(), workDir); err != nil {
+	if _, err := svc.EnterGrain(context.Background(), workDir, ""); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.attached == nil || plugin.attached.GrainID != "grain123" {
@@ -497,7 +698,7 @@ func TestEnterGrainChoosesSingleGrainAndAttaches(t *testing.T) {
 	}
 }
 
-func TestLoadProjectMigratesLegacyVagrantLayout(t *testing.T) {
+func TestListKeysDoesNotFallbackToLegacyVagrantLayout(t *testing.T) {
 	t.Parallel()
 
 	workDir := t.TempDir()
@@ -519,24 +720,20 @@ func TestLoadProjectMigratesLegacyVagrantLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := svc.ListKeys(context.Background(), workDir, nil)
-	if err != nil {
-		t.Fatal(err)
+	_, err := svc.ListKeys(context.Background(), workDir, nil, "")
+	if err == nil {
+		t.Fatal("expected missing config error")
 	}
-	if result.Stdout != "legacy-key\n" {
-		t.Fatalf("unexpected result: %+v", result)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected domain error, got %T", err)
 	}
-
-	st, err := state.New().Load(context.Background(), workDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st == nil || st.Provider != domain.ProviderVagrant || st.Stack != "lemp" || st.VMInstance != "legacy-vagrant-instance" {
-		t.Fatalf("unexpected migrated state: %+v", st)
+	if domainErr.Code != domain.ErrNotFound {
+		t.Fatalf("unexpected error: %+v", domainErr)
 	}
 }
 
-func TestLoadProjectMigratesLegacyLimaLayout(t *testing.T) {
+func TestUpgradeVMMigratesLegacyLimaLayout(t *testing.T) {
 	t.Parallel()
 
 	workDir := t.TempDir()
@@ -544,7 +741,11 @@ func TestLoadProjectMigratesLegacyLimaLayout(t *testing.T) {
 	plugin := &fakePlugin{
 		name:           domain.ProviderLima,
 		detectInstance: "legacy-lima-instance",
-		execResult:     runner.Result{Stdout: "legacy-key\n"},
+		bootstrapFiles: []providers.RenderedFile{{
+			Path: filepath.Join(".sandstorm", ".generated", "lima.yaml"),
+			Body: []byte("mounts: []\n"),
+			Mode: 0o644,
+		}},
 	}
 	svc := newService(t, plugin, home)
 
@@ -558,19 +759,27 @@ func TestLoadProjectMigratesLegacyLimaLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := svc.ListKeys(context.Background(), workDir, nil)
+	st, err := svc.UpgradeVM(context.Background(), workDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Stdout != "legacy-key\n" {
-		t.Fatalf("unexpected result: %+v", result)
+	if st.Provider != domain.ProviderLima || st.Stack != "node" || st.VMInstance != "legacy-lima-instance" {
+		t.Fatalf("unexpected migrated state: %+v", st)
 	}
 
-	st, err := state.New().Load(context.Background(), workDir)
+	projectData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st == nil || st.Provider != domain.ProviderLima || st.Stack != "node" || st.VMInstance != "legacy-lima-instance" {
-		t.Fatalf("unexpected migrated state: %+v", st)
+	if got := string(projectData); !strings.Contains(got, `stack = "node"`) {
+		t.Fatalf("unexpected project config: %q", got)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(localData); !strings.Contains(got, `provider = "lima"`) {
+		t.Fatalf("unexpected local config: %q", got)
 	}
 }

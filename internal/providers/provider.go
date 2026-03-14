@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mnutt/spktool/internal/config"
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/runner"
 )
@@ -12,6 +13,8 @@ import (
 type ProjectContext struct {
 	WorkDir string
 	State   *domain.ProjectState
+	Config  *config.Resolved
+	Verbose bool
 }
 
 type Status struct {

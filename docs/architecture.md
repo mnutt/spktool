@@ -16,10 +16,11 @@ implementation to typed boundaries that are easier to test and evolve.
 
 - `internal/cli`
   Parses global flags, preserves legacy verbs like `setupvm` and `vm up`, and
-  supports machine-readable output.
+  supports machine-readable output plus config inspection commands such as
+  `config render`.
 - `internal/services`
-  Owns provider-agnostic business workflows such as project setup, state
-  management, initialization, and VM lifecycle orchestration.
+  Owns provider-agnostic business workflows such as project setup, config
+  rendering, legacy migration, initialization, and VM lifecycle orchestration.
 - `internal/providers`
   Defines the `Provider` contract:
   `Up/Halt/Destroy/SSH/Exec/Provision/Status`
@@ -28,8 +29,6 @@ implementation to typed boundaries that are easier to test and evolve.
 - `internal/runner`
   Executes external commands with trace IDs, retries, timeouts, captured
   stdout/stderr, and redaction hooks.
-- `internal/state`
-  Persists stable project state to `.sandstorm/project-state.json`.
 - `internal/templates`
   Embeds stacks, box assets, and helpers directly into the binary.
 - `internal/keys`
@@ -41,7 +40,8 @@ Each provider plugin has two responsibilities:
 
 1. Implement the runtime contract for VM lifecycle and command execution.
 2. Contribute provider-specific bootstrap files during `setupvm` and
-   `upgradevm`.
+   `upgradevm`, and expose those same rendered artifacts for inspection via
+   `config render`.
 
 That keeps service logic provider-agnostic while still letting each backend own
 its instance naming and host integration details.
@@ -64,26 +64,26 @@ same pattern.
 
 ## Stable State
 
-The new project state file lives at:
+The current config-driven project model centers on:
 
-- `.sandstorm/project-state.json`
+- `.sandstorm/box.toml`
+- `.sandstorm/box.local.toml`
+- `.sandstorm/.generated/*`
 
-Current fields:
+Ownership rules:
 
-- `schemaVersion`
-- `migration`
-- `provider`
-- `vmInstance`
-- `stack`
-- `toolVersion`
-- `updatedAt`
+- `box.toml` is the checked-in source of truth
+- `box.local.toml` is local-only override state
+- `.generated/*` is disposable derived output
+- provider artifacts like `lima.yaml` and `Vagrantfile` are regenerated, not
+  edited in place
 
-This file is the anchor for:
+Legacy metadata may still exist in older projects, such as `.sandstorm/stack`
+and legacy top-level provider files like `.sandstorm/lima.yaml` and
+`.sandstorm/Vagrantfile`.
 
-- provider detection
-- idempotent setup/upgrade decisions
-- future migration logic
-- scripting and machine-readable inspection
+These are used only for explicit migration via `upgradevm`, not routine command
+execution.
 
 ## Compatibility Strategy
 
@@ -100,9 +100,17 @@ surface immediately.
 
 The intended test mix is:
 
-1. Unit tests for `services`, `workflow`, `state`, and template rendering
+1. Unit tests for `services`, `workflow`, and template rendering
 2. Provider contract tests shared by all provider implementations
 3. Small smoke tests against real provider CLIs
 
 The current scaffold includes unit coverage for workflow rollback behavior and
-state round-tripping. Provider contract fixtures should be the next addition.
+config-driven service behavior. Recent manual Lima verification also proved out
+several real-provider assumptions:
+
+- `config render` exposes the same generated files written by `setupvm` and
+  `upgradevm`
+- Lima QEMU needs an explicit mount type for the Debian 12 image
+- Lima provisioning must target the existing instance rather than rerunning
+  `limactl start`
+- shared guest setup logic cannot assume a `vagrant` user exists
