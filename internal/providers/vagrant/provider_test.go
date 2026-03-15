@@ -13,12 +13,16 @@ import (
 )
 
 type captureRunner struct {
-	spec runner.Spec
+	spec   runner.Spec
+	result runner.Result
 }
 
 func (r *captureRunner) Run(_ context.Context, spec runner.Spec) (runner.Result, error) {
 	r.spec = spec
-	return runner.Result{Stdout: "ok"}, nil
+	if r.result.Stdout == "" && r.result.Stderr == "" && r.result.ExitCode == 0 && r.result.TraceID == "" && r.result.Command == "" && r.result.Duration == 0 {
+		return runner.Result{Stdout: "ok"}, nil
+	}
+	return r.result, nil
 }
 
 func TestBootstrapFilesIncludeVagrantfile(t *testing.T) {
@@ -108,6 +112,43 @@ func TestExecUsesVagrantSSHInSandstormDir(t *testing.T) {
 	}
 }
 
+func TestSSHUsesInteractiveModeWithoutArgs(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	err := provider.SSH(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.spec.Interactive {
+		t.Fatal("expected interactive ssh session")
+	}
+	if r.spec.Stream {
+		t.Fatal("did not expect streamed mode for interactive ssh")
+	}
+}
+
+func TestSSHStreamsWhenArgsAreProvided(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	err := provider.SSH(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, []string{"-c", "pwd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.spec.Interactive {
+		t.Fatal("did not expect interactive mode for ssh command")
+	}
+	if !r.spec.Stream {
+		t.Fatal("expected streamed mode for ssh command")
+	}
+	if got := strings.Join(r.spec.Args, " "); got != "ssh -c pwd" {
+		t.Fatalf("unexpected args: %q", got)
+	}
+}
+
 func TestUpRunsVagrantInGeneratedDirWithStreaming(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +164,7 @@ func TestUpRunsVagrantInGeneratedDirWithStreaming(t *testing.T) {
 	if r.spec.Dir != filepath.Join("/workspace/demo", ".sandstorm", ".generated") {
 		t.Fatalf("unexpected dir: %q", r.spec.Dir)
 	}
-	if got := strings.Join(r.spec.Args, " "); got != "up" {
+	if got := strings.Join(r.spec.Args, " "); got != "up --no-provision" {
 		t.Fatalf("unexpected args: %q", got)
 	}
 	if !r.spec.Stream {
@@ -151,5 +192,41 @@ func TestProvisionRunsVagrantProvisionInGeneratedDirWithStreaming(t *testing.T) 
 	}
 	if !r.spec.Stream {
 		t.Fatal("expected streamed output for vagrant provision")
+	}
+}
+
+func TestStatusReportsVagrantMachineState(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{
+		result: runner.Result{
+			Stdout: "1700000000,default,metadata,provider,libvirt\n1700000001,default,state,running\n",
+		},
+	}
+	provider := New(r, templates.New())
+	status, err := provider.Status(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "running" {
+		t.Fatalf("unexpected state: %+v", status)
+	}
+}
+
+func TestStatusReportsNotCreatedWhenMachineDoesNotExist(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{
+		result: runner.Result{
+			Stdout: "1700000001,default,state,not_created\n",
+		},
+	}
+	provider := New(r, templates.New())
+	status, err := provider.Status(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "not_created" {
+		t.Fatalf("unexpected state: %+v", status)
 	}
 }

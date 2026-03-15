@@ -25,9 +25,24 @@ type fakePlugin struct {
 	bootstrapFiles  []providers.RenderedFile
 	execResult      runner.Result
 	execErr         error
+	upErr           error
+	haltErr         error
+	destroyErr      error
+	sshErr          error
+	provisionErr    error
+	statusResult    providers.Status
+	statusErr       error
 	execHook        func(providers.ProjectContext, []string) error
+	upHook          func(providers.ProjectContext) error
+	haltHook        func(providers.ProjectContext) error
+	destroyHook     func(providers.ProjectContext) error
+	sshHook         func(providers.ProjectContext, []string) error
+	provisionHook   func(providers.ProjectContext) error
+	statusHook      func(providers.ProjectContext) (providers.Status, error)
 	lastExecCtx     providers.ProjectContext
 	lastExecCmd     []string
+	lastActionCtx   providers.ProjectContext
+	lastSSHArgs     []string
 	lastWriteFiles  []providers.RenderedFile
 	lastInteractive []string
 	grains          []providers.Grain
@@ -43,11 +58,34 @@ func (p *fakePlugin) BootstrapFiles(_ providers.ProjectContext) ([]providers.Ren
 
 func (p *fakePlugin) DetectInstanceName(_ string) string { return p.detectInstance }
 
-func (p *fakePlugin) Up(context.Context, providers.ProjectContext) error      { return nil }
-func (p *fakePlugin) Halt(context.Context, providers.ProjectContext) error    { return nil }
-func (p *fakePlugin) Destroy(context.Context, providers.ProjectContext) error { return nil }
-func (p *fakePlugin) SSH(context.Context, providers.ProjectContext, []string) error {
-	return nil
+func (p *fakePlugin) Up(_ context.Context, project providers.ProjectContext) error {
+	p.lastActionCtx = project
+	if p.upHook != nil {
+		return p.upHook(project)
+	}
+	return p.upErr
+}
+func (p *fakePlugin) Halt(_ context.Context, project providers.ProjectContext) error {
+	p.lastActionCtx = project
+	if p.haltHook != nil {
+		return p.haltHook(project)
+	}
+	return p.haltErr
+}
+func (p *fakePlugin) Destroy(_ context.Context, project providers.ProjectContext) error {
+	p.lastActionCtx = project
+	if p.destroyHook != nil {
+		return p.destroyHook(project)
+	}
+	return p.destroyErr
+}
+func (p *fakePlugin) SSH(_ context.Context, project providers.ProjectContext, args []string) error {
+	p.lastActionCtx = project
+	p.lastSSHArgs = append([]string(nil), args...)
+	if p.sshHook != nil {
+		return p.sshHook(project, args)
+	}
+	return p.sshErr
 }
 func (p *fakePlugin) Exec(_ context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
 	p.lastExecCtx = project
@@ -76,8 +114,21 @@ func (p *fakePlugin) AttachGrain(_ context.Context, _ providers.ProjectContext, 
 	p.attachChecksum = checksum
 	return nil
 }
-func (p *fakePlugin) Provision(context.Context, providers.ProjectContext) error { return nil }
-func (p *fakePlugin) Status(context.Context, providers.ProjectContext) (providers.Status, error) {
+func (p *fakePlugin) Provision(_ context.Context, project providers.ProjectContext) error {
+	p.lastActionCtx = project
+	if p.provisionHook != nil {
+		return p.provisionHook(project)
+	}
+	return p.provisionErr
+}
+func (p *fakePlugin) Status(_ context.Context, project providers.ProjectContext) (providers.Status, error) {
+	p.lastActionCtx = project
+	if p.statusHook != nil {
+		return p.statusHook(project)
+	}
+	if p.statusResult.Provider != "" || p.statusResult.InstanceName != "" || p.statusResult.State != "" || p.statusErr != nil {
+		return p.statusResult, p.statusErr
+	}
 	return providers.Status{Provider: p.name, InstanceName: p.detectInstance, State: "reported"}, nil
 }
 
@@ -441,6 +492,9 @@ func TestUpgradeVMLegacyProjectWritesRuntimeEnv(t *testing.T) {
 	if !strings.Contains(string(runtimeEnv), "SANDSTORM_BASE_URL=http://local.sandstorm.io:6090") {
 		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
 	}
+	if !strings.Contains(string(runtimeEnv), "SANDSTORM_WILDCARD_HOST=*.local.sandstorm.io:6090") {
+		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
+	}
 }
 
 func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
@@ -471,11 +525,284 @@ func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
 		t.Fatalf("unexpected helper path: %q", plugin.lastWriteFiles[1].Path)
 	}
 	interactive := strings.Join(plugin.lastInteractive, " ")
-	if !strings.Contains(interactive, "sg sandstorm -c") {
+	if !strings.Contains(interactive, "sudo -u sandstorm -g sandstorm bash -lc") {
 		t.Fatalf("unexpected interactive command: %q", interactive)
+	}
+	if !strings.Contains(interactive, "/opt/app/.sandstorm/build.sh &&") {
+		t.Fatalf("missing build step: %q", interactive)
 	}
 	if !strings.Contains(interactive, "spk dev --pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef") {
 		t.Fatalf("missing spk dev command: %q", interactive)
+	}
+}
+
+func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	var upCalls int
+	var provisionCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "unknown",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+		provisionHook: func(project providers.ProjectContext) error {
+			provisionCalls++
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.VMCreate(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.Config == nil {
+		t.Fatalf("vm create missing project context: %+v", plugin.lastActionCtx)
+	}
+	if plugin.lastActionCtx.State.Provider != domain.ProviderLima || plugin.lastActionCtx.State.Stack != "lemp" {
+		t.Fatalf("unexpected vm create state: %+v", plugin.lastActionCtx.State)
+	}
+	if plugin.lastActionCtx.Config.Provider != domain.ProviderLima || plugin.lastActionCtx.Config.Stack != "lemp" {
+		t.Fatalf("unexpected vm create config: %+v", plugin.lastActionCtx.Config)
+	}
+	if upCalls != 1 || provisionCalls != 1 {
+		t.Fatalf("expected vm create to call up and provision once each, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+
+	if _, err := svc.VMUp(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.Config == nil {
+		t.Fatalf("vm up missing project context: %+v", plugin.lastActionCtx)
+	}
+	if plugin.lastActionCtx.State.Provider != domain.ProviderLima || plugin.lastActionCtx.State.Stack != "lemp" {
+		t.Fatalf("unexpected vm up state: %+v", plugin.lastActionCtx.State)
+	}
+	if plugin.lastActionCtx.Config.Provider != domain.ProviderLima || plugin.lastActionCtx.Config.Stack != "lemp" {
+		t.Fatalf("unexpected vm up config: %+v", plugin.lastActionCtx.Config)
+	}
+	if upCalls != 2 || provisionCalls != 1 {
+		t.Fatalf("expected vm up to call up only after vm create, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+
+	if _, err := svc.VMHalt(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.State.VMInstance != "sandstorm-app-1234" {
+		t.Fatalf("unexpected vm halt context: %+v", plugin.lastActionCtx.State)
+	}
+
+	if _, err := svc.VMProvision(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.lastActionCtx.Config == nil || plugin.lastActionCtx.Config.Network.Sandstorm.ExternalPort != 6090 {
+		t.Fatalf("unexpected vm provision context: %+v", plugin.lastActionCtx.Config)
+	}
+
+	if _, err := svc.VMDestroy(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.lastActionCtx.WorkDir != workDir {
+		t.Fatalf("unexpected vm destroy context: %+v", plugin.lastActionCtx)
+	}
+}
+
+func TestVMCreateReturnsProvisionErrorAfterSuccessfulStart(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	expectedErr := errors.New("provision failed")
+	var upCalls int
+	var provisionCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "unknown",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+		provisionHook: func(project providers.ProjectContext) error {
+			provisionCalls++
+			return expectedErr
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.VMCreate(context.Background(), workDir, "")
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("expected provision error, got %v", err)
+	}
+	if upCalls != 1 || provisionCalls != 1 {
+		t.Fatalf("expected vm create to call up and provision once each, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMUpDoesNotProvision(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	var upCalls int
+	var provisionCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "unknown",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+		provisionHook: func(project providers.ProjectContext) error {
+			provisionCalls++
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.VMUp(context.Background(), workDir, ""); err != nil {
+		t.Fatal(err)
+	}
+	if upCalls != 1 || provisionCalls != 0 {
+		t.Fatalf("expected vm up to call up only, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMCreateReturnsConflictWhenInstanceAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	var upCalls int
+	var provisionCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "stopped",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+		provisionHook: func(project providers.ProjectContext) error {
+			provisionCalls++
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.VMCreate(context.Background(), workDir, "")
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrConflict {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
+	if upCalls != 0 || provisionCalls != 0 {
+		t.Fatalf("expected vm create conflict before up/provision, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMStatusUsesProviderOverrideInResolvedContext(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	vagrantPlugin := &fakePlugin{
+		name:           domain.ProviderVagrant,
+		detectInstance: "vagrant-app",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderVagrant,
+			InstanceName: "vagrant-app",
+			State:        "running",
+		},
+	}
+	svc := newService(t, vagrantPlugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("lemp"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := svc.VMStatus(context.Background(), workDir, domain.ProviderVagrant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Provider != domain.ProviderVagrant || status.InstanceName != "vagrant-app" {
+		t.Fatalf("unexpected status: %+v", status)
+	}
+	if vagrantPlugin.lastActionCtx.Config == nil || vagrantPlugin.lastActionCtx.Config.Provider != domain.ProviderVagrant {
+		t.Fatalf("expected provider override to reach status context: %+v", vagrantPlugin.lastActionCtx.Config)
+	}
+}
+
+func TestVMSSHForwardsArgsAndResolvedContext(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderVagrant,
+		detectInstance: "vagrant-app",
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := svc.VMSSH(context.Background(), workDir, []string{"-c", "pwd"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Provider != domain.ProviderVagrant || st.Stack != "lemp" {
+		t.Fatalf("unexpected returned state: %+v", st)
+	}
+	if len(plugin.lastSSHArgs) != 2 || plugin.lastSSHArgs[0] != "-c" || plugin.lastSSHArgs[1] != "pwd" {
+		t.Fatalf("unexpected ssh args: %#v", plugin.lastSSHArgs)
+	}
+	if plugin.lastActionCtx.Config == nil || plugin.lastActionCtx.Config.Provider != domain.ProviderVagrant {
+		t.Fatalf("unexpected ssh context: %+v", plugin.lastActionCtx.Config)
 	}
 }
 

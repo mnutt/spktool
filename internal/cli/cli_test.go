@@ -23,7 +23,9 @@ type fakeApp struct {
 	listkeys   func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	getkey     func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
 	enterGrain func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	vmCreate   func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmUp       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	vmSSH      func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
 	status     func(context.Context, string, domain.ProviderName) (providers.Status, error)
 	stacks     []string
 }
@@ -64,6 +66,9 @@ func (a *fakeApp) GetKey(ctx context.Context, workDir, keyID string, provider do
 func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.enterGrain(ctx, workDir, provider)
 }
+func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.vmCreate(ctx, workDir, provider)
+}
 func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.vmUp(ctx, workDir, provider)
 }
@@ -79,8 +84,8 @@ func (a *fakeApp) VMStatus(ctx context.Context, workDir string, provider domain.
 func (a *fakeApp) VMProvision(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
 }
-func (a *fakeApp) VMSSH(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error) {
-	panic("unexpected call")
+func (a *fakeApp) VMSSH(ctx context.Context, workDir string, args []string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.vmSSH(ctx, workDir, args, provider)
 }
 func (a *fakeApp) StackNames() ([]string, error) { return a.stacks, nil }
 
@@ -293,6 +298,111 @@ func TestRunVMStatusJSONOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !payload.OK || payload.Result.Provider != domain.ProviderLima || payload.Result.State != "running" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestRunVMCreateDispatchesToCreate(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var called bool
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmCreate: func(_ context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderVagrant {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			called = true
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "--provider", "vagrant", "vm", "create"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("expected vm create dispatch")
+	}
+	if got := stdout.String(); got != "provider=vagrant stack=node vm=demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMSSHPrintsProjectState(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotArgs []string
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmSSH: func(_ context.Context, workDir string, args []string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderVagrant {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			gotArgs = append([]string(nil), args...)
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "--provider", "vagrant", "vm", "ssh", "-c", "pwd"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "provider=vagrant stack=node vm=demo\n" {
+		t.Fatalf("unexpected CLI output: %q", got)
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != "-c" || gotArgs[1] != "pwd" {
+		t.Fatalf("unexpected ssh args: %#v", gotArgs)
+	}
+}
+
+func TestRunVMSSHJSONErrorUsesResponseWrapper(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmSSH: func(_ context.Context, _ string, _ []string, _ domain.ProviderName) (*domain.ProjectState, error) {
+			return nil, &domain.Error{Code: domain.ErrExternal, Op: "cli-test", Message: "ssh failed"}
+		},
+	}
+
+	err := Run(context.Background(), app, Config{
+		Program:         "spktool",
+		Args:            []string{"--output", "json", "vm", "ssh", "-c", "pwd"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ok"] != false || payload["error"] == "" {
 		t.Fatalf("unexpected payload: %+v", payload)
 	}
 }

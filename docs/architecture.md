@@ -58,9 +58,9 @@ This structure is intended to replace:
 - partially-applied setup logic
 - opaque subprocess failures with no operation context
 
-The current scaffold uses the workflow engine for `setupvm` and `upgradevm`.
-Future migration should move `dev`, `pack`, `publish`, and provisioning onto the
-same pattern.
+The current scaffold uses the workflow engine for `setupvm`, `dev`, `pack`,
+`verify`, and `publish`. `upgradevm` still uses a simpler linear flow today and
+can move onto the same pattern later if it needs explicit rollback structure.
 
 ## Stable State
 
@@ -91,7 +91,8 @@ Compatibility is handled at the CLI edge instead of inside the services:
 
 - `argv[0] == vagrant-spk` defaults the provider to `vagrant`
 - `argv[0] == lima-spk` defaults the provider to `lima`
-- legacy verbs like `setupvm`, `upgradevm`, and `vm up` remain first-class
+- legacy verbs like `setupvm`, `upgradevm`, and `vm up` remain first-class,
+  with `vm create` added for first-boot provisioning
 
 This allows internals to change without forcing users to relearn the command
 surface immediately.
@@ -105,8 +106,8 @@ The intended test mix is:
 3. Small smoke tests against real provider CLIs
 
 The current scaffold includes unit coverage for workflow rollback behavior and
-config-driven service behavior. Recent manual Lima verification also proved out
-several real-provider assumptions:
+config-driven service behavior. Recent real-provider verification also proved
+out several assumptions:
 
 - `config render` exposes the same generated files written by `setupvm` and
   `upgradevm`
@@ -114,3 +115,7 @@ several real-provider assumptions:
 - Lima provisioning must target the existing instance rather than rerunning
   `limactl start`
 - shared guest setup logic cannot assume a `vagrant` user exists
+- Vagrant runs correctly from `.sandstorm/.generated/`
+- `runtime.env` is visible inside both Lima and Vagrant guests via the project
+  mount
+- build-tagged acceptance coverage now exists for both Lima and Vagrant

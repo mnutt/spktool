@@ -1,9 +1,11 @@
 package lima
 
 import (
+	"bufio"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -104,8 +106,19 @@ func (p *Provider) Destroy(ctx context.Context, project providers.ProjectContext
 }
 
 func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, args []string) error {
-	argv := append([]string{"shell", p.DetectInstanceName(project.WorkDir)}, args...)
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-shell", Command: "limactl", Args: argv})
+	argv := []string{"shell"}
+	if len(args) == 0 {
+		argv = append(argv, "--workdir", "/opt/app")
+	}
+	argv = append(argv, p.DetectInstanceName(project.WorkDir))
+	argv = append(argv, args...)
+	spec := runner.Spec{Name: "lima-shell", Command: "limactl", Args: argv}
+	if len(args) == 0 {
+		spec.Interactive = true
+	} else {
+		spec.Stream = true
+	}
+	_, err := p.runner.Run(ctx, spec)
 	return err
 }
 
@@ -198,10 +211,30 @@ func (p *Provider) AttachGrain(ctx context.Context, project providers.ProjectCon
 func (p *Provider) Status(ctx context.Context, project providers.ProjectContext) (providers.Status, error) {
 	result, err := p.runner.Run(ctx, runner.Spec{Name: "lima-list", Command: "limactl", Args: []string{"list", "--json"}})
 	status := providers.Status{Provider: p.Name(), InstanceName: p.DetectInstanceName(project.WorkDir), State: "unknown"}
-	if err == nil && result.Stdout != "" {
-		status.State = "reported"
+	if err != nil {
+		return status, err
 	}
-	return status, err
+	scanner := bufio.NewScanner(strings.NewReader(result.Stdout))
+	for scanner.Scan() {
+		var item struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		if item.Name != status.InstanceName {
+			continue
+		}
+		if item.Status != "" {
+			status.State = strings.ToLower(item.Status)
+		}
+		return status, nil
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return status, scanErr
+	}
+	return status, nil
 }
 
 func shellJoin(parts []string) string {

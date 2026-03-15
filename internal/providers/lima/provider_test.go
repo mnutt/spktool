@@ -13,12 +13,16 @@ import (
 )
 
 type captureRunner struct {
-	spec runner.Spec
+	spec   runner.Spec
+	result runner.Result
 }
 
 func (r *captureRunner) Run(_ context.Context, spec runner.Spec) (runner.Result, error) {
 	r.spec = spec
-	return runner.Result{Stdout: "ok"}, nil
+	if r.result.Stdout == "" && r.result.Stderr == "" && r.result.ExitCode == 0 && r.result.TraceID == "" && r.result.Command == "" && r.result.Duration == 0 {
+		return runner.Result{Stdout: "ok"}, nil
+	}
+	return r.result, nil
 }
 
 func TestDetectInstanceNameSanitizesWorkspacePath(t *testing.T) {
@@ -141,6 +145,48 @@ func TestExecUsesLimactlShellWithWorkdir(t *testing.T) {
 	}
 }
 
+func TestSSHUsesInteractiveModeWithoutArgs(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	err := provider.SSH(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.spec.Interactive {
+		t.Fatal("expected interactive ssh session")
+	}
+	if r.spec.Stream {
+		t.Fatal("did not expect streamed mode for interactive ssh")
+	}
+	got := strings.Join(r.spec.Args, " ")
+	if !strings.Contains(got, "shell --workdir /opt/app sandstorm-demo-") {
+		t.Fatalf("unexpected args: %q", got)
+	}
+}
+
+func TestSSHStreamsWhenArgsAreProvided(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	err := provider.SSH(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, []string{"sh", "-lc", "pwd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.spec.Interactive {
+		t.Fatal("did not expect interactive mode for ssh command")
+	}
+	if !r.spec.Stream {
+		t.Fatal("expected streamed mode for ssh command")
+	}
+	got := strings.Join(r.spec.Args, " ")
+	if !strings.Contains(got, "shell sandstorm-demo-") || !strings.Contains(got, "sh -lc pwd") {
+		t.Fatalf("unexpected args: %q", got)
+	}
+}
+
 func TestProvisionUsesExistingInstanceShell(t *testing.T) {
 	t.Parallel()
 
@@ -162,5 +208,46 @@ func TestProvisionUsesExistingInstanceShell(t *testing.T) {
 	}
 	if !r.spec.Stream {
 		t.Fatal("expected streamed provisioning output")
+	}
+}
+
+func TestStatusReportsExistingInstanceState(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/workspace/demo"
+	expectedName := New(&captureRunner{}, templates.New()).DetectInstanceName(workDir)
+	r := &captureRunner{
+		result: runner.Result{
+			Stdout: "{\"name\":\"other\",\"status\":\"Running\"}\n{\"name\":\"" + expectedName + "\",\"status\":\"Stopped\"}\n",
+		},
+	}
+	provider := New(r, templates.New())
+	status, err := provider.Status(context.Background(), providers.ProjectContext{WorkDir: workDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.InstanceName != expectedName {
+		t.Fatalf("unexpected instance name: %+v", status)
+	}
+	if status.State != "stopped" {
+		t.Fatalf("unexpected state: %+v", status)
+	}
+}
+
+func TestStatusReturnsUnknownWhenInstanceIsMissing(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{
+		result: runner.Result{
+			Stdout: "{\"name\":\"other\",\"status\":\"Running\"}\n",
+		},
+	}
+	provider := New(r, templates.New())
+	status, err := provider.Status(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "unknown" {
+		t.Fatalf("expected unknown state, got %+v", status)
 	}
 }

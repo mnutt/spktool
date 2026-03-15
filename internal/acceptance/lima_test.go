@@ -32,7 +32,7 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 		t.Skip("limactl is not installed")
 	}
 
-	workDir := mustMkdirTempInRepo(t)
+	workDir := mustMkdirTempInRepo(t, "acceptance-lima-")
 	binPath := buildBinary(t)
 
 	runSpktool(t, binPath, "--work-directory", workDir, "setupvm", "node", "--provider", "lima")
@@ -46,6 +46,9 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 	if !strings.Contains(runtimeEnv, "SANDSTORM_EXTERNAL_PORT=6090") {
 		t.Fatalf("runtime.env missing external port:\n%s", runtimeEnv)
 	}
+	if !strings.Contains(runtimeEnv, "SANDSTORM_WILDCARD_HOST=*.local.sandstorm.io:6090") {
+		t.Fatalf("runtime.env missing wildcard host port:\n%s", runtimeEnv)
+	}
 
 	render := runSpktool(t, binPath, "--work-directory", workDir, "config", "render", "--provider", "lima")
 	if !strings.Contains(render, "mountType: reverse-sshfs") {
@@ -57,6 +60,9 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 	if !strings.Contains(render, "SANDSTORM_BASE_URL=http://local.sandstorm.io:6090") {
 		t.Fatalf("config render missing runtime.env contents:\n%s", render)
 	}
+	if !strings.Contains(render, "SANDSTORM_WILDCARD_HOST=*.local.sandstorm.io:6090") {
+		t.Fatalf("config render missing wildcard host port:\n%s", render)
+	}
 
 	instanceName := detectInstanceNameFromWorkDir(workDir)
 	t.Logf("acceptance workdir: %s", workDir)
@@ -67,8 +73,8 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 		runCommandBestEffort(t, repoRoot(t), nil, "limactl", "delete", "--force", instanceName)
 	})
 
-	runSpktoolStream(t, binPath, "--work-directory", workDir, "vm", "up", "--provider", "lima")
-	instanceName = detectInstanceName(t, binPath, workDir)
+	runSpktoolStream(t, binPath, "--work-directory", workDir, "vm", "create", "--provider", "lima")
+	instanceName = detectInstanceName(t, binPath, workDir, "lima")
 
 	mounted := runCommand(t, workDir, nil, "limactl", "shell", instanceName, "sh", "-lc", "test -d /opt/app/.sandstorm && echo mounted")
 	if !strings.Contains(mounted, "mounted") {
@@ -79,8 +85,6 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 	if !strings.Contains(guestRuntimeEnv, "SANDSTORM_EXTERNAL_PORT=6090") {
 		t.Fatalf("runtime.env not visible in guest:\n%s", guestRuntimeEnv)
 	}
-
-	runSpktoolStream(t, binPath, "--work-directory", workDir, "vm", "provision", "--provider", "lima")
 
 	serviceState := runCommand(t, workDir, nil, "limactl", "shell", instanceName, "sh", "-lc", "systemctl is-active sandstorm")
 	if !strings.Contains(strings.TrimSpace(serviceState), "active") {
@@ -94,11 +98,79 @@ func TestLimaLifecycleAcceptance(t *testing.T) {
 	}
 }
 
-func mustMkdirTempInRepo(t *testing.T) string {
+func TestVagrantLifecycleAcceptance(t *testing.T) {
+	acceptanceMu.Lock()
+	t.Cleanup(acceptanceMu.Unlock)
+
+	if os.Getenv("SPKTOOL_ACCEPTANCE_VAGRANT") != "1" {
+		t.Skip("set SPKTOOL_ACCEPTANCE_VAGRANT=1 to enable real Vagrant acceptance tests")
+	}
+	if _, err := exec.LookPath("vagrant"); err != nil {
+		t.Skip("vagrant is not installed")
+	}
+
+	workDir := mustMkdirTempInRepo(t, "acceptance-vagrant-")
+	binPath := buildBinary(t)
+
+	runSpktool(t, binPath, "--work-directory", workDir, "setupvm", "node", "--provider", "vagrant")
+
+	runtimeEnvPath := filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env")
+	runtimeEnvBytes, err := os.ReadFile(runtimeEnvPath)
+	if err != nil {
+		t.Fatalf("expected runtime.env to exist after setupvm: %v", err)
+	}
+	runtimeEnv := string(runtimeEnvBytes)
+	if !strings.Contains(runtimeEnv, "SANDSTORM_EXTERNAL_PORT=6090") {
+		t.Fatalf("runtime.env missing external port:\n%s", runtimeEnv)
+	}
+
+	render := runSpktool(t, binPath, "--work-directory", workDir, "config", "render", "--provider", "vagrant")
+	if !strings.Contains(render, "== .sandstorm/.generated/Vagrantfile ==") {
+		t.Fatalf("config render missing expected Vagrantfile section:\n%s", render)
+	}
+	if !strings.Contains(render, "== .sandstorm/.generated/runtime.env ==") {
+		t.Fatalf("config render missing runtime.env section:\n%s", render)
+	}
+	if !strings.Contains(render, "SANDSTORM_WILDCARD_HOST=*.local.sandstorm.io:6090") {
+		t.Fatalf("config render missing wildcard host port:\n%s", render)
+	}
+	if !strings.Contains(render, `"/host-dot-sandstorm"`) {
+		t.Fatalf("config render missing host-dot-sandstorm mount:\n%s", render)
+	}
+
+	t.Cleanup(func() {
+		runSpktoolBestEffort(t, binPath, "--work-directory", workDir, "vm", "destroy", "--provider", "vagrant")
+	})
+
+	runSpktoolStream(t, binPath, "--work-directory", workDir, "vm", "create", "--provider", "vagrant")
+
+	instanceName := detectInstanceName(t, binPath, workDir, "vagrant")
+	if instanceName == "" {
+		t.Fatal("vm status did not return a Vagrant instance name")
+	}
+
+	guestRuntimeEnv := runSpktool(t, binPath, "--work-directory", workDir, "vm", "ssh", "--provider", "vagrant", "-c", "grep '^SANDSTORM_EXTERNAL_PORT=6090$' /opt/app/.sandstorm/.generated/runtime.env")
+	if !strings.Contains(guestRuntimeEnv, "SANDSTORM_EXTERNAL_PORT=6090") {
+		t.Fatalf("runtime.env not visible in guest:\n%s", guestRuntimeEnv)
+	}
+
+	hostMount := runSpktool(t, binPath, "--work-directory", workDir, "vm", "ssh", "--provider", "vagrant", "-c", "test -d /host-dot-sandstorm && echo mounted")
+	if !strings.Contains(hostMount, "mounted") {
+		t.Fatalf("host-dot-sandstorm mount missing inside guest:\n%s", hostMount)
+	}
+
+	runSpktoolStream(t, binPath, "--work-directory", workDir, "init", "--provider", "vagrant")
+
+	if _, err := os.Stat(filepath.Join(workDir, ".sandstorm", "sandstorm-pkgdef.capnp")); err != nil {
+		t.Fatalf("expected sandstorm-pkgdef.capnp to exist: %v", err)
+	}
+}
+
+func mustMkdirTempInRepo(t *testing.T, prefix string) string {
 	t.Helper()
 
 	repoRoot := repoRoot(t)
-	workDir, err := os.MkdirTemp(repoRoot, "acceptance-lima-")
+	workDir, err := os.MkdirTemp(repoRoot, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,10 +189,10 @@ func buildBinary(t *testing.T) string {
 	return binPath
 }
 
-func detectInstanceName(t *testing.T, binPath, workDir string) string {
+func detectInstanceName(t *testing.T, binPath, workDir, provider string) string {
 	t.Helper()
 
-	result := runSpktool(t, binPath, "--work-directory", workDir, "--output", "json", "vm", "status", "--provider", "lima")
+	result := runSpktool(t, binPath, "--work-directory", workDir, "--output", "json", "vm", "status", "--provider", provider)
 	var payload struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -146,6 +218,12 @@ func runSpktoolStream(t *testing.T, binPath string, args ...string) string {
 	t.Helper()
 
 	return runCommandStreaming(t, repoRoot(t), nil, binPath, args...)
+}
+
+func runSpktoolBestEffort(t *testing.T, binPath string, args ...string) {
+	t.Helper()
+
+	runCommandBestEffort(t, repoRoot(t), nil, binPath, args...)
 }
 
 func runCommandBestEffort(t *testing.T, dir string, extraEnv []string, name string, args ...string) {

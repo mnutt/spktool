@@ -30,6 +30,7 @@ type App interface {
 	ListKeys(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	GetKey(context.Context, string, string, domain.ProviderName) (runner.Result, error)
 	EnterGrain(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	VMCreate(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMUp(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMDestroy(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
@@ -230,6 +231,9 @@ func runSetupVM(ctx context.Context, app App, out, errOut io.Writer, format, wor
 
 func runVM(ctx context.Context, app App, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
 	switch args[0] {
+	case "create":
+		state, err := app.VMCreate(ctx, workDir, providerOverride)
+		return respond(out, format, state, err)
 	case "up":
 		state, err := app.VMUp(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
@@ -270,7 +274,7 @@ Commands:
   listkeys [args...]
   getkey <key-id>
   enter-grain
-  vm up|halt|destroy|status|provision|ssh
+  vm create|up|halt|destroy|status|provision|ssh
 
 Flags:
   --provider vagrant|lima

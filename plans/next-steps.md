@@ -34,13 +34,11 @@ Lima verification found and fixed:
 
 Still outstanding:
 
-- manual Vagrant verification (deferred on macOS)
-- broader smoke/integration coverage
+- no blocking engineering work remains in this migration plan
 
 ## Recommended Order
 
-1. Add more smoke/integration coverage
-2. Manually verify Vagrant end-to-end once the host is suitable
+1. Manual follow-ups only as needed
 
 ## Concrete Checklist
 
@@ -80,11 +78,10 @@ Goal:
 
 Test flow:
 1. `spktool setupvm node`
-2. `spktool vm up`
-3. `spktool vm provision`
-4. `spktool init`
-5. Check that Sandstorm is reachable on the configured external port
-6. Confirm host/origin behavior matches the configured port
+2. `spktool vm create`
+3. `spktool init`
+4. Check that Sandstorm is reachable on the configured external port
+5. Confirm host/origin behavior matches the configured port
 
 Specific things to verify:
 - `/.sandstorm/.generated/lima.yaml` is valid for the installed Lima version
@@ -93,7 +90,7 @@ Specific things to verify:
 - disabling auto port forwarding actually suppresses the extra port noise after recreating the instance
 
 Observed results:
-- `setupvm`, `config render`, `vm up`, `vm provision`, and `init` all succeeded
+- `setupvm`, `config render`, `vm create`, and `init` all succeeded
   against a real Lima 2.0.3 instance after the fixes above.
 - Sandstorm was active in the guest and listening on `0.0.0.0:6090`.
 - Lima hostagent logs showed the host-side forward for port `6090` being
@@ -108,15 +105,17 @@ Potential files to inspect if something fails:
 
 ### 3. Manually verify Vagrant end-to-end
 
+Status:
+- Done
+
 Goal:
 - Confirm the `.generated` working-directory move did not break Vagrant assumptions.
 
 Test flow:
 1. `spktool setupvm node --provider vagrant`
-2. `spktool vm up`
-3. `spktool vm provision`
-4. `spktool init`
-5. Confirm the configured external port works
+2. `spktool vm create`
+3. `spktool init`
+4. Confirm the configured external port works
 
 Specific things to verify:
 - Vagrant runs correctly from `/.sandstorm/.generated/`
@@ -127,6 +126,15 @@ Specific things to verify:
 Files to inspect:
 - `/Users/mnutt/p/personal/spktool/internal/templates/assets/box/Vagrantfile`
 - `/Users/mnutt/p/personal/spktool/internal/providers/vagrant/provider.go`
+
+Observed results:
+- `setupvm`, `vm create`, and `init` succeeded against a real
+  Linux Vagrant/libvirt host after fixing the Node stack reprovision GPG issue.
+- Vagrant ran from `/.sandstorm/.generated/` as intended.
+- `runtime.env` was visible in the guest at
+  `/opt/app/.sandstorm/.generated/runtime.env`.
+- `/host-dot-sandstorm` remained mounted and usable inside the guest.
+- Sandstorm remained reachable on the configured forwarded port.
 
 ### 4. Remove or isolate legacy state fallback
 
@@ -223,7 +231,7 @@ Key points to document:
 ### 8. Add smoke/integration coverage
 
 Status:
-- In progress
+- Done
 
 Goal:
 - Add a small amount of real-provider coverage for the risky parts.
@@ -239,13 +247,16 @@ Current progress:
   command shape
 - provider-level Vagrant tests now cover generated mount/port rendering plus
   `up` and `provision` command shape from `/.sandstorm/.generated/`
+- service-level tests now cover VM lifecycle passthrough, provider overrides,
+  and SSH argument/context wiring
 - the opt-in Lima acceptance test now verifies `runtime.env` exists after
   `setupvm`, is included in `config render`, and is visible in the guest mount
-- an opt-in `go test -tags=acceptance ./internal/acceptance` lane exists for a
-  real Lima lifecycle test
+- an opt-in `go test -tags=acceptance ./internal/acceptance` lane now exists
+  for both real Lima and real Vagrant lifecycle tests
 
-If real-provider CI is too heavy:
-- add more contract-style tests around provider rendering and service orchestration
+Definition of done:
+- Completed. The risky config/render/generated-path/lifecycle paths now have
+  contract or real-provider coverage on both Lima and Vagrant.
 
 Files to extend:
 - `/Users/mnutt/p/personal/spktool/internal/providers/lima/provider_test.go`

@@ -521,14 +521,61 @@ func (s *ProjectService) VMUp(ctx context.Context, workDir string, providerOverr
 	return projectState, nil
 }
 
+func (s *ProjectService) VMCreate(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.loadProject(ctx, workDir, providerOverride)
+	if err != nil {
+		return nil, err
+	}
+	project := s.projectContext(workDir, projectState, resolved)
+	status, err := plugin.Status(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	if vmStateExists(status.State) {
+		return nil, &domain.Error{
+			Code:    domain.ErrConflict,
+			Op:      "services.VMCreate",
+			Message: fmt.Sprintf("vm instance %q already exists; use `vm up` or `vm provision`", status.InstanceName),
+		}
+	}
+	if err := plugin.Up(ctx, project); err != nil {
+		return nil, err
+	}
+	if err := plugin.Provision(ctx, project); err != nil {
+		return nil, err
+	}
+	return projectState, nil
+}
+
+func vmStateExists(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "unknown", "not_created", "not created":
+		return false
+	default:
+		return true
+	}
+}
+
 func (s *ProjectService) devCommand(provider domain.ProviderName, wrapperPath string) []string {
-	buildCmd := "/opt/app/.sandstorm/build.sh && cd /opt/app/.sandstorm && spk dev --pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef"
+	buildCmd := "/opt/app/.sandstorm/build.sh"
+	devCmd := "cd /opt/app/.sandstorm && spk dev --pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef"
 	switch provider {
 	case domain.ProviderLima:
-		return []string{"bash", wrapperPath, "--", "sg", "sandstorm", "-c", buildCmd}
+		return []string{
+			"bash", wrapperPath, "--",
+			"bash", "-lc",
+			buildCmd + " && sudo -u sandstorm -g sandstorm bash -lc " + devShellQuote(devCmd),
+		}
 	default:
-		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd}
+		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd + " && " + devCmd}
 	}
+}
+
+func devShellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func (s *ProjectService) VMHalt(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -758,7 +805,7 @@ func renderRuntimeEnv(resolved *config.Resolved) []byte {
 		resolved.Network.Sandstorm.GuestPort,
 		resolved.Network.Sandstorm.Host,
 		resolved.Network.Sandstorm.ExternalPort,
-		config.WildcardHost(resolved.Network.Sandstorm.Host),
+		config.WildcardHost(resolved.Network.Sandstorm.Host, resolved.Network.Sandstorm.ExternalPort),
 	))
 }
 

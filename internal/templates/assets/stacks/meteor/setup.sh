@@ -53,9 +53,26 @@ if [ ! -f "$METEOR_CACHE_TARGET" ] ; then
     echo "...done."
 fi
 
+APP_USER="${SUDO_USER:-}"
+if [[ -z "${APP_USER}" || "${APP_USER}" == "root" ]]; then
+    if id -u vagrant >/dev/null 2>&1; then
+        APP_USER="vagrant"
+    else
+        APP_USER="$(find /home -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | head -n1)"
+    fi
+fi
+if [[ -z "${APP_USER}" ]] || ! id -u "${APP_USER}" >/dev/null 2>&1; then
+    echo "could not determine unprivileged app user" >&2
+    exit 1
+fi
+APP_HOME="$(getent passwd "${APP_USER}" | cut -d: -f6)"
+if [[ -z "${APP_HOME}" ]]; then
+    APP_HOME="/home/${APP_USER}"
+fi
+
 # Extract as unprivileged user, which is the usual meteor setup
-cd /home/vagrant/
-su -c "tar xf '${METEOR_CACHE_TARGET}'" vagrant
+cd "${APP_HOME}"
+su -c "tar xf '${METEOR_CACHE_TARGET}'" "${APP_USER}"
 # Link into global PATH
-if [ ! -e /usr/bin/meteor ] ; then ln -s /home/vagrant/.meteor/meteor /usr/bin/meteor ; fi
-chown vagrant:vagrant /home/vagrant -R
+if [ ! -e /usr/bin/meteor ] ; then ln -s "${APP_HOME}/.meteor/meteor" /usr/bin/meteor ; fi
+chown "${APP_USER}:${APP_USER}" "${APP_HOME}" -R

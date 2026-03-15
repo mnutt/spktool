@@ -35,13 +35,16 @@ typed workflows, and a stable project state file.
 ```sh
 spktool setupvm node --provider lima
 spktool config render --provider lima
-spktool vm up --provider lima
-spktool vm provision --provider lima
+spktool vm create --provider lima
 spktool init --provider lima
 ```
 
 `spktool config render` prints the resolved generated artifacts without
 requiring the VM to exist.
+
+`spktool vm create` starts a VM and runs provisioning. `spktool vm up` starts an
+existing VM without reprovisioning, and `spktool vm provision` reruns guest
+setup explicitly.
 
 ## Lima Notes
 
@@ -62,11 +65,15 @@ gate so they do not run in the default unit-test lane.
 SPKTOOL_ACCEPTANCE_LIMA=1 \
 GOCACHE=/tmp/go-build \
 go test -tags=acceptance ./internal/acceptance -run TestLimaLifecycleAcceptance -count=1
+
+SPKTOOL_ACCEPTANCE_VAGRANT=1 \
+GOCACHE=/tmp/go-build \
+go test -tags=acceptance ./internal/acceptance -run TestVagrantLifecycleAcceptance -count=1
 ```
 
-The Lima acceptance test:
+The acceptance tests:
 
-- uses a real `limactl`
+- use a real `limactl` or `vagrant`
 - runs serially
 - builds a fresh `spktool` binary
 - creates a disposable project directory under the repo
@@ -85,7 +92,8 @@ The Lima acceptance test:
 
 ## Next Migration Steps
 
-1. Add stricter config validation and clearer config-focused subcommands.
-2. Expand smoke tests around generated artifacts and real provider lifecycle.
-3. Keep migrating the remaining legacy workflows onto explicit service/workflow
-   steps.
+1. Add optional config-focused subcommands such as `config validate` or
+   `config show`.
+2. Improve subcommand-specific help text and operator ergonomics.
+3. Revisit Lima defaults on Apple Silicon once there is a clearer desired
+   support matrix.

@@ -292,12 +292,16 @@ func DetectProvider(defaultProvider domain.ProviderName) domain.ProviderName {
 	return ""
 }
 
-func WildcardHost(host string) string {
+func WildcardHost(host string, externalPort int) string {
 	host = strings.TrimSpace(host)
 	if host == "" {
 		return ""
 	}
-	return "*." + host
+	wildcard := "*." + host
+	if externalPort != 80 && externalPort > 0 {
+		wildcard += ":" + fmt.Sprintf("%d", externalPort)
+	}
+	return wildcard
 }
 
 func mustLimaDefaults() LimaResolved {

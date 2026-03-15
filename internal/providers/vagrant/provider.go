@@ -56,7 +56,7 @@ func (p *Provider) DetectInstanceName(workDir string) string {
 }
 
 func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) error {
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-up", Command: "vagrant", Args: []string{"up"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated"), Stream: true})
+	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-up", Command: "vagrant", Args: []string{"up", "--no-provision"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated"), Stream: true})
 	return err
 }
 
@@ -72,7 +72,13 @@ func (p *Provider) Destroy(ctx context.Context, project providers.ProjectContext
 
 func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, args []string) error {
 	allArgs := append([]string{"ssh"}, args...)
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-ssh", Command: "vagrant", Args: allArgs, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
+	spec := runner.Spec{Name: "vagrant-ssh", Command: "vagrant", Args: allArgs, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")}
+	if len(args) == 0 {
+		spec.Interactive = true
+	} else {
+		spec.Stream = true
+	}
+	_, err := p.runner.Run(ctx, spec)
 	return err
 }
 
@@ -157,10 +163,22 @@ func (p *Provider) AttachGrain(ctx context.Context, project providers.ProjectCon
 func (p *Provider) Status(ctx context.Context, project providers.ProjectContext) (providers.Status, error) {
 	result, err := p.runner.Run(ctx, runner.Spec{Name: "vagrant-status", Command: "vagrant", Args: []string{"status", "--machine-readable"}, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 	status := providers.Status{Provider: p.Name(), InstanceName: p.DetectInstanceName(project.WorkDir), State: "unknown"}
-	if err == nil && result.Stdout != "" {
-		status.State = "reported"
+	if err != nil {
+		return status, err
 	}
-	return status, err
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		fields := strings.Split(line, ",")
+		if len(fields) < 4 {
+			continue
+		}
+		if fields[2] != "state" {
+			continue
+		}
+		if fields[len(fields)-1] != "" {
+			status.State = fields[len(fields)-1]
+		}
+	}
+	return status, nil
 }
 
 func shellJoin(parts []string) string {
