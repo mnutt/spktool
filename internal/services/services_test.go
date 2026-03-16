@@ -132,15 +132,30 @@ func (p *fakePlugin) Status(_ context.Context, project providers.ProjectContext)
 	return providers.Status{Provider: p.name, InstanceName: p.detectInstance, State: "reported"}, nil
 }
 
-func newService(t *testing.T, plugin providers.Plugin, home string) *services.ProjectService {
+type testServices struct {
+	*services.ProjectBootstrapService
+	*services.PackageService
+	*services.GrainService
+	*services.KeyService
+	*services.VMLifecycleService
+}
+
+func newService(t *testing.T, plugin providers.Plugin, home string) *testServices {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return services.NewProjectService(
+	svc := services.NewServices(
 		logger,
 		templates.New(),
 		providers.NewRegistry(plugin),
 		keys.NewLocalKeyring(home),
 	)
+	return &testServices{
+		ProjectBootstrapService: svc.ProjectBootstrap,
+		PackageService:          svc.Package,
+		GrainService:            svc.Grain,
+		KeyService:              svc.Key,
+		VMLifecycleService:      svc.VM,
+	}
 }
 
 func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
@@ -305,6 +320,37 @@ func TestSetupVMPreservesExistingLocalConfigWithoutForce(t *testing.T) {
 	}
 	if got := string(localData); !strings.Contains(got, `provider = "vagrant"`) {
 		t.Fatalf("expected local config to be preserved, got %q", got)
+	}
+}
+
+func TestSetupVMUpdatesExistingLocalConfigWhenProviderChanges(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+	}
+	svc := newService(t, plugin, home)
+
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), []byte("provider = \"vagrant\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "meteor", false); err != nil {
+		t.Fatal(err)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(localData); !strings.Contains(got, `provider = "lima"`) {
+		t.Fatalf("expected local config to be updated, got %q", got)
 	}
 }
 
@@ -908,6 +954,72 @@ func TestPublishStagesPackageRunsGuestPublishAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestVerifySkipsSelfCopyWhenPackageIsAlreadyStaged(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderVagrant,
+		detectInstance: "app",
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderVagrant, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	input := filepath.Join(workDir, ".sandstorm", "input.spk")
+	if err := os.WriteFile(input, []byte("verify-me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Verify(context.Background(), workDir, input, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "verify-me" {
+		t.Fatalf("expected staged file to remain intact, got %q", string(data))
+	}
+}
+
+func TestPublishSkipsSelfCopyWhenPackageIsAlreadyStaged(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app",
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	input := filepath.Join(workDir, ".sandstorm", "publish.spk")
+	if err := os.WriteFile(input, []byte("publish-me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Publish(context.Background(), workDir, input, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "publish-me" {
+		t.Fatalf("expected staged file to remain intact, got %q", string(data))
+	}
+}
+
 func TestKeygenRunsSPKInsideGuest(t *testing.T) {
 	t.Parallel()
 
@@ -1014,7 +1126,7 @@ func TestEnterGrainChoosesSingleGrainAndAttaches(t *testing.T) {
 	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.EnterGrain(context.Background(), workDir, ""); err != nil {
+	if _, err := svc.EnterGrain(context.Background(), workDir, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.attached == nil || plugin.attached.GrainID != "grain123" {
@@ -1022,6 +1134,34 @@ func TestEnterGrainChoosesSingleGrainAndAttaches(t *testing.T) {
 	}
 	if plugin.attachChecksum == "" {
 		t.Fatal("expected checksum to be passed to provider")
+	}
+}
+
+func TestEnterGrainNoninteractiveFailsWhenMultipleGrainsExist(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app",
+		grains: []providers.Grain{
+			{SupervisorPID: "100", GrainID: "grain123", ChildPID: 200},
+			{SupervisorPID: "101", GrainID: "grain456", ChildPID: 201},
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.EnterGrain(context.Background(), workDir, "", true)
+	if err == nil {
+		t.Fatal("expected noninteractive mode to reject multiple grains")
+	}
+	if plugin.attached != nil {
+		t.Fatalf("did not expect grain attachment, got %+v", plugin.attached)
 	}
 }
 

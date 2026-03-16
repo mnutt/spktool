@@ -21,6 +21,9 @@ type ExecutionError struct {
 }
 
 func (e *ExecutionError) Error() string {
+	if len(e.RollbackErrors) > 0 {
+		return fmt.Sprintf("workflow %s failed at step %s: %v (%d rollback errors)", e.Workflow, e.Step, e.Err, len(e.RollbackErrors))
+	}
 	return fmt.Sprintf("workflow %s failed at step %s: %v", e.Workflow, e.Step, e.Err)
 }
 

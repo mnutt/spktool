@@ -19,13 +19,17 @@ implementation to typed boundaries that are easier to test and evolve.
   supports machine-readable output plus config inspection commands such as
   `config render`.
 - `internal/services`
-  Owns provider-agnostic business workflows such as project setup, config
-  rendering, legacy migration, initialization, and VM lifecycle orchestration.
+  Owns provider-agnostic business workflows. The package is split into focused
+  services:
+  `ProjectBootstrapService`, `PackageService`, `VMLifecycleService`,
+  `GrainService`, and `KeyService`.
 - `internal/providers`
-  Defines the `Provider` contract:
-  `Up/Halt/Destroy/SSH/Exec/Provision/Status`
+  Defines capability-oriented contracts:
+  `ProviderCore`, `CommandExecutor`, `FileWriter`, `BootstrapRenderer`, and
+  `GrainManager`.
 - `internal/workflow`
   Runs explicit steps with rollback hooks and returns typed workflow errors.
+  This is a small step runner, not a general workflow engine.
 - `internal/runner`
   Executes external commands with trace IDs, retries, timeouts, captured
   stdout/stderr, and redaction hooks.
@@ -38,19 +42,23 @@ implementation to typed boundaries that are easier to test and evolve.
 
 Each provider plugin has two responsibilities:
 
-1. Implement the runtime contract for VM lifecycle and command execution.
+1. Implement the runtime capabilities needed by services:
+   `ProviderCore`, `CommandExecutor`, and `FileWriter`.
 2. Contribute provider-specific bootstrap files during `setupvm` and
    `upgradevm`, and expose those same rendered artifacts for inspection via
    `config render`.
+
+Grain attachment is intentionally modeled as an optional capability via
+`GrainManager` instead of shaping the required VM lifecycle contract.
 
 That keeps service logic provider-agnostic while still letting each backend own
 its instance naming and host integration details.
 
 ## Workflow Model
 
-Business operations are modeled as workflows rather than shell chains. A
-workflow is an ordered list of named steps, and each step can declare a rollback
-hook.
+Business operations that need rollback are modeled as workflows rather than
+shell chains. A workflow is an ordered list of named steps, and each step can
+declare a rollback hook.
 
 This structure is intended to replace:
 
@@ -58,9 +66,11 @@ This structure is intended to replace:
 - partially-applied setup logic
 - opaque subprocess failures with no operation context
 
-The current scaffold uses the workflow engine for `setupvm`, `dev`, `pack`,
-`verify`, and `publish`. `upgradevm` still uses a simpler linear flow today and
-can move onto the same pattern later if it needs explicit rollback structure.
+The current implementation keeps workflow intentionally small. It is used for
+`setupvm`, `dev`, `pack`, `verify`, and `publish`, where rollback semantics are
+useful. Simpler linear operations stay as ordinary service methods. Rollback
+failures are attached to the typed execution error and surfaced in the returned
+message.
 
 ## Stable State
 
@@ -102,7 +112,7 @@ surface immediately.
 The intended test mix is:
 
 1. Unit tests for `services`, `workflow`, and template rendering
-2. Provider contract tests shared by all provider implementations
+2. Provider capability contract tests shared by all provider implementations
 3. Small smoke tests against real provider CLIs
 
 The current scaffold includes unit coverage for workflow rollback behavior and

@@ -8,6 +8,7 @@ import (
 
 	"github.com/mnutt/spktool/internal/config"
 	"github.com/mnutt/spktool/internal/providers"
+	"github.com/mnutt/spktool/internal/providers/contracttests"
 	"github.com/mnutt/spktool/internal/runner"
 	"github.com/mnutt/spktool/internal/templates"
 )
@@ -229,4 +230,55 @@ func TestStatusReportsNotCreatedWhenMachineDoesNotExist(t *testing.T) {
 	if status.State != "not_created" {
 		t.Fatalf("unexpected state: %+v", status)
 	}
+}
+
+func TestProviderCoreContract(t *testing.T) {
+	t.Parallel()
+
+	contracttests.RunProviderCoreContract(t, contracttests.CoreHarness{
+		NewProvider: func(r runner.Runner, repo *templates.Repository) providers.ProviderCore {
+			return New(r, repo)
+		},
+		Project: providers.ProjectContext{WorkDir: "/workspace/demo"},
+		ExpectUp: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if spec.Command != "vagrant" {
+				t.Fatalf("unexpected up command: %q", spec.Command)
+			}
+			if spec.Dir != filepath.Join("/workspace/demo", ".sandstorm", ".generated") {
+				t.Fatalf("unexpected up dir: %q", spec.Dir)
+			}
+			if !spec.Stream {
+				t.Fatal("expected vagrant up to stream output")
+			}
+		},
+		ExpectHalt: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); got != "halt" {
+				t.Fatalf("unexpected halt args: %q", got)
+			}
+		},
+		ExpectDestroy: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); got != "destroy -f" {
+				t.Fatalf("unexpected destroy args: %q", got)
+			}
+		},
+		ExpectProvision: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); got != "provision" {
+				t.Fatalf("unexpected provision args: %q", got)
+			}
+		},
+		StatusStdout: "1700000001,default,state,running\n",
+		ExpectStatus: func(t *testing.T, status providers.Status, spec runner.Spec) {
+			t.Helper()
+			if spec.Command != "vagrant" {
+				t.Fatalf("unexpected status command: %q", spec.Command)
+			}
+			if status.State != "running" {
+				t.Fatalf("unexpected status: %+v", status)
+			}
+		},
+	})
 }

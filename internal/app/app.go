@@ -38,14 +38,20 @@ func Run(ctx context.Context, argv []string) int {
 		return 1
 	}
 
-	service := services.NewProjectService(
+	serviceSet := services.NewServices(
 		logger,
 		repo,
 		registry,
 		keys.NewLocalKeyring(home),
 	)
 
-	if err := cli.Run(ctx, service, cli.Config{
+	if err := cli.Run(ctx, cli.Applications{
+		Bootstrap: serviceSet.ProjectBootstrap,
+		Packages:  serviceSet.Package,
+		Keys:      serviceSet.Key,
+		Grains:    serviceSet.Grain,
+		VM:        serviceSet.VM,
+	}, cli.Config{
 		Program:         program,
 		Args:            argv[1:],
 		DefaultProvider: defaultProvider,

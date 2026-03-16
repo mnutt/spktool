@@ -9,10 +9,11 @@ typed workflows, and a stable project state file.
 
 - One binary, with provider selection via `--provider` or argv compatibility
   (`vagrant-spk` and `lima-spk` can become symlinks later).
-- A `Provider` boundary for VM lifecycle and guest execution.
-- Provider-agnostic project services for `setupvm`, `upgradevm`, `init`, and VM
-  lifecycle calls.
-- A workflow engine with rollback hooks and typed error wrapping.
+- Provider capability interfaces for VM lifecycle, guest execution, bootstrap
+  rendering, guest file writes, and grain attachment.
+- Provider-agnostic project services split by concern: bootstrap, packages, VM
+  lifecycle, grains, and keys.
+- A small workflow step runner with rollback hooks and typed error wrapping.
 - A structured command runner with timeout/retry/redaction/trace ID support.
 - Embedded legacy assets under `internal/templates/assets/`.
 - Project config under `.sandstorm/box.toml` with local overrides in
@@ -90,10 +91,13 @@ The acceptance tests:
 - `internal/templates/`: embedded stacks, helpers, and box assets
 - `internal/keys/`: swappable keyring abstraction
 
-## Next Migration Steps
+## Architecture Status
 
-1. Add optional config-focused subcommands such as `config validate` or
-   `config show`.
-2. Improve subcommand-specific help text and operator ergonomics.
-3. Revisit Lima defaults on Apple Silicon once there is a clearer desired
-   support matrix.
+- Service logic is split by concern into bootstrap, package, VM lifecycle,
+  grain, and key services.
+- The CLI depends on grouped application capabilities rather than one
+  monolithic app interface.
+- Providers expose smaller capability contracts, with shared provider-core
+  contract tests covering the common VM lifecycle surface.
+- `internal/workflow` is intentionally a minimal step runner used only where
+  rollback semantics add value.

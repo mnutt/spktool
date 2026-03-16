@@ -22,7 +22,7 @@ type fakeApp struct {
 	keygen     func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	listkeys   func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	getkey     func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
-	enterGrain func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	enterGrain func(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
 	vmCreate   func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmUp       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmSSH      func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
@@ -63,8 +63,8 @@ func (a *fakeApp) ListKeys(ctx context.Context, workDir string, args []string, p
 func (a *fakeApp) GetKey(ctx context.Context, workDir, keyID string, provider domain.ProviderName) (runner.Result, error) {
 	return a.getkey(ctx, workDir, keyID, provider)
 }
-func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
-	return a.enterGrain(ctx, workDir, provider)
+func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domain.ProviderName, noninteractive bool) (*domain.ProjectState, error) {
+	return a.enterGrain(ctx, workDir, provider, noninteractive)
 }
 func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.vmCreate(ctx, workDir, provider)
@@ -88,6 +88,16 @@ func (a *fakeApp) VMSSH(ctx context.Context, workDir string, args []string, prov
 	return a.vmSSH(ctx, workDir, args, provider)
 }
 func (a *fakeApp) StackNames() ([]string, error) { return a.stacks, nil }
+
+func appSet(app *fakeApp) Applications {
+	return Applications{
+		Bootstrap: app,
+		Packages:  app,
+		Keys:      app,
+		Grains:    app,
+		VM:        app,
+	}
+}
 
 func TestRunSetupVMUsesDefaultProviderAndPrintsText(t *testing.T) {
 	t.Parallel()
@@ -114,7 +124,7 @@ func TestRunSetupVMUsesDefaultProviderAndPrintsText(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "vagrant-spk",
 		Args:            []string{"--work-directory", "/tmp/demo", "setupvm", "lemp"},
 		DefaultProvider: domain.ProviderVagrant,
@@ -147,7 +157,7 @@ func TestRunSetupVMParsesProviderAfterCommand(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program: "spktool",
 		Args:    []string{"setupvm", "node", "--provider", "lima"},
 		Stdout:  &bytes.Buffer{},
@@ -176,7 +186,7 @@ func TestRunSetupVMParsesForceFlag(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program: "spktool",
 		Args:    []string{"setupvm", "--force", "node"},
 		Stdout:  &bytes.Buffer{},
@@ -212,7 +222,7 @@ func TestRunConfigRenderDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program: "spktool",
 		Args:    []string{"config", "render", "--provider", "lima", "--work-directory", "/workspace/app"},
 		Stdout:  &stdout,
@@ -246,7 +256,7 @@ func TestRunDevUsesAliasDefaultProvider(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "lima-spk",
 		Args:            []string{"dev"},
 		DefaultProvider: domain.ProviderLima,
@@ -279,7 +289,7 @@ func TestRunVMStatusJSONOutput(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "--output", "json", "vm", "status"},
 		DefaultProvider: domain.ProviderLima,
@@ -321,7 +331,7 @@ func TestRunVMCreateDispatchesToCreate(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "--provider", "vagrant", "vm", "create"},
 		DefaultProvider: domain.ProviderLima,
@@ -358,7 +368,7 @@ func TestRunVMSSHPrintsProjectState(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "--provider", "vagrant", "vm", "ssh", "-c", "pwd"},
 		DefaultProvider: domain.ProviderLima,
@@ -387,7 +397,7 @@ func TestRunVMSSHJSONErrorUsesResponseWrapper(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--output", "json", "vm", "ssh", "-c", "pwd"},
 		DefaultProvider: domain.ProviderLima,
@@ -413,7 +423,7 @@ func TestRunSetupVMMissingStackReturnsAvailableStacks(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{stacks: []string{"lemp", "meteor"}}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--output", "json", "setupvm"},
 		DefaultProvider: domain.ProviderLima,
@@ -430,6 +440,34 @@ func TestRunSetupVMMissingStackReturnsAvailableStacks(t *testing.T) {
 	}
 	if payload["error"] != "stack is required" {
 		t.Fatalf("unexpected error payload: %+v", payload)
+	}
+	if payload["usage"] == "" {
+		t.Fatalf("expected usage payload: %+v", payload)
+	}
+}
+
+func TestRunSetupVMMissingStackPrintsUsageInTextMode(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	app := &fakeApp{stacks: []string{"lemp", "meteor"}}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"setupvm"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stdout.String()
+	if !bytes.Contains([]byte(got), []byte("error: stack is required")) {
+		t.Fatalf("expected text error output, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("usage: setupvm [--force] <stack>")) {
+		t.Fatalf("expected setupvm usage output, got %q", got)
 	}
 }
 
@@ -451,7 +489,7 @@ func TestRunDevDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "dev"},
 		DefaultProvider: domain.ProviderLima,
@@ -480,7 +518,7 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "pack", "out.spk"},
 		DefaultProvider: domain.ProviderLima,
@@ -492,6 +530,24 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 	}
 	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunPackMissingOutputShowsUsageInTextMode(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"pack"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: pack <output.spk>")) {
+		t.Fatalf("expected pack usage output, got %q", got)
 	}
 }
 
@@ -509,7 +565,7 @@ func TestRunVerifyDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "verify", "input.spk"},
 		DefaultProvider: domain.ProviderLima,
@@ -538,7 +594,7 @@ func TestRunPublishDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "publish", "input.spk"},
 		DefaultProvider: domain.ProviderLima,
@@ -567,7 +623,7 @@ func TestRunKeygenPrintsCommandStdout(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "keygen", "--admin"},
 		DefaultProvider: domain.ProviderLima,
@@ -596,7 +652,7 @@ func TestRunListKeysJSONOutput(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "--output", "json", "listkeys"},
 		DefaultProvider: domain.ProviderLima,
@@ -633,7 +689,7 @@ func TestRunGetKeyDispatchesToApp(t *testing.T) {
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "getkey", "kid123"},
 		DefaultProvider: domain.ProviderLima,
@@ -648,21 +704,49 @@ func TestRunGetKeyDispatchesToApp(t *testing.T) {
 	}
 }
 
+func TestRunGetKeyMissingIDShowsUsageInJSON(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"--output", "json", "getkey"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["error"] != "getkey key id is required" {
+		t.Fatalf("unexpected json payload: %+v", payload)
+	}
+	if payload["usage"] == "" {
+		t.Fatalf("expected usage in payload: %+v", payload)
+	}
+}
+
 func TestRunEnterGrainDispatchesToApp(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		enterGrain: func(_ context.Context, workDir string, _ domain.ProviderName) (*domain.ProjectState, error) {
+		enterGrain: func(_ context.Context, workDir string, _ domain.ProviderName, noninteractive bool) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if noninteractive {
+				t.Fatal("did not expect noninteractive mode")
 			}
 			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
 		},
 	}
 
-	err := Run(context.Background(), app, Config{
+	err := Run(context.Background(), appSet(app), Config{
 		Program:         "spktool",
 		Args:            []string{"--work-directory", "/workspace/app", "enter-grain"},
 		DefaultProvider: domain.ProviderLima,
@@ -674,5 +758,198 @@ func TestRunEnterGrainDispatchesToApp(t *testing.T) {
 	}
 	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunEnterGrainPassesNoninteractiveFlag(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{
+		stacks: []string{"lemp"},
+		enterGrain: func(_ context.Context, _ string, _ domain.ProviderName, noninteractive bool) (*domain.ProjectState, error) {
+			if !noninteractive {
+				t.Fatal("expected noninteractive mode")
+			}
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
+		},
+	}
+
+	if err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"--noninteractive", "enter-grain"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &bytes.Buffer{},
+		Stderr:          &bytes.Buffer{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunSetupVMHelpAfterCommandDoesNotTriggerGlobalHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"setupvm", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("Usage:\n  setupvm [--force] <stack>")) {
+		t.Fatalf("expected setupvm help output, got %q", got)
+	}
+}
+
+func TestRunConfigHelpAfterCommandShowsConfigHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"config", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("Usage:\n  config render")) {
+		t.Fatalf("expected config help output, got %q", got)
+	}
+}
+
+func TestRunVMHelpAfterCommandShowsVMHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"vm", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("Usage:\n  vm create")) {
+		t.Fatalf("expected vm help output, got %q", got)
+	}
+}
+
+func TestRunVMMissingSubcommandShowsVMHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"vm"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("vm manages provider instances")) {
+		t.Fatalf("expected vm help output, got %q", got)
+	}
+}
+
+func TestRunVMMissingSubcommandShowsUsageInJSON(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"--output", "json", "vm"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["error"] != "vm subcommand is required" {
+		t.Fatalf("unexpected json payload: %+v", payload)
+	}
+	if payload["usage"] == "" {
+		t.Fatalf("expected usage in payload: %+v", payload)
+	}
+}
+
+func TestRunVMSubcommandHelpShowsVMHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"vm", "ssh", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("vm ssh [args...]")) {
+		t.Fatalf("expected vm help output, got %q", got)
+	}
+}
+
+func TestRunConfigSubcommandHelpShowsConfigHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"config", "render", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("config exposes generated configuration artifacts")) {
+		t.Fatalf("expected help output, got %q", got)
+	}
+}
+
+func TestRunConfigUnknownSubcommandShowsUsage(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"config", "show"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: config render")) {
+		t.Fatalf("expected config usage output, got %q", got)
+	}
+}
+
+func TestRunVMUnknownSubcommandShowsUsage(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"vm", "restart"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: vm create|up|halt|destroy|status|provision|ssh")) {
+		t.Fatalf("expected vm usage output, got %q", got)
 	}
 }

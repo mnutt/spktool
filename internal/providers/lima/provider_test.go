@@ -8,6 +8,7 @@ import (
 
 	"github.com/mnutt/spktool/internal/config"
 	"github.com/mnutt/spktool/internal/providers"
+	"github.com/mnutt/spktool/internal/providers/contracttests"
 	"github.com/mnutt/spktool/internal/runner"
 	"github.com/mnutt/spktool/internal/templates"
 )
@@ -250,4 +251,53 @@ func TestStatusReturnsUnknownWhenInstanceIsMissing(t *testing.T) {
 	if status.State != "unknown" {
 		t.Fatalf("expected unknown state, got %+v", status)
 	}
+}
+
+func TestProviderCoreContract(t *testing.T) {
+	t.Parallel()
+
+	instanceName := New(&captureRunner{}, templates.New()).DetectInstanceName("/workspace/demo")
+	contracttests.RunProviderCoreContract(t, contracttests.CoreHarness{
+		NewProvider: func(r runner.Runner, repo *templates.Repository) providers.ProviderCore {
+			return New(r, repo)
+		},
+		Project: providers.ProjectContext{WorkDir: "/workspace/demo"},
+		ExpectUp: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if spec.Command != "limactl" {
+				t.Fatalf("unexpected up command: %q", spec.Command)
+			}
+			if !spec.Stream {
+				t.Fatal("expected lima up to stream output")
+			}
+		},
+		ExpectHalt: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); !strings.Contains(got, "stop sandstorm-demo-") {
+				t.Fatalf("unexpected halt args: %q", got)
+			}
+		},
+		ExpectDestroy: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); !strings.Contains(got, "delete --force sandstorm-demo-") {
+				t.Fatalf("unexpected destroy args: %q", got)
+			}
+		},
+		ExpectProvision: func(t *testing.T, spec runner.Spec) {
+			t.Helper()
+			if got := strings.Join(spec.Args, " "); !strings.Contains(got, "shell --workdir /opt/app/.sandstorm sandstorm-demo-") {
+				t.Fatalf("unexpected provision args: %q", got)
+			}
+		},
+		StatusStdout: "{\"name\":\"" + instanceName + "\",\"status\":\"Running\"}\n",
+		ExpectStatus: func(t *testing.T, status providers.Status, spec runner.Spec) {
+			t.Helper()
+			if spec.Command != "limactl" {
+				t.Fatalf("unexpected status command: %q", spec.Command)
+			}
+			if status.State != "running" {
+				t.Fatalf("unexpected status: %+v", status)
+			}
+		},
+	})
 }

@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,19 +16,32 @@ import (
 	"github.com/mnutt/spktool/internal/services"
 )
 
-type App interface {
+type ProjectBootstrapApp interface {
 	SetupVM(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
 	UpgradeVM(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	RenderConfig(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
+	StackNames() ([]string, error)
+}
+
+type PackageApp interface {
 	Init(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	Dev(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	Pack(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	Verify(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	Publish(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+}
+
+type KeyApp interface {
 	Keygen(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	ListKeys(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	GetKey(context.Context, string, string, domain.ProviderName) (runner.Result, error)
-	EnterGrain(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+}
+
+type GrainApp interface {
+	EnterGrain(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
+}
+
+type VMApp interface {
 	VMCreate(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMUp(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
@@ -37,7 +49,14 @@ type App interface {
 	VMStatus(context.Context, string, domain.ProviderName) (providers.Status, error)
 	VMProvision(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMSSH(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
-	StackNames() ([]string, error)
+}
+
+type Applications struct {
+	Bootstrap ProjectBootstrapApp
+	Packages  PackageApp
+	Keys      KeyApp
+	Grains    GrainApp
+	VM        VMApp
 }
 
 type Config struct {
@@ -59,7 +78,7 @@ type GlobalFlags struct {
 	ShowVer   bool
 }
 
-func Run(ctx context.Context, app App, cfg Config) error {
+func Run(ctx context.Context, apps Applications, cfg Config) error {
 	normalizedArgs := normalizeGlobalArgs(cfg.Args)
 	flags := flag.NewFlagSet(cfg.Program, flag.ContinueOnError)
 	flags.SetOutput(cfg.Stderr)
@@ -84,65 +103,71 @@ func Run(ctx context.Context, app App, cfg Config) error {
 
 	args := flags.Args()
 	if global.ShowHelp || len(args) == 0 {
-		return printHelp(cfg.Stdout, app, cfg.Program)
+		return printHelp(cfg.Stdout, apps.Bootstrap, cfg.Program)
 	}
 
 	command := args[0]
 	providerOverride := resolveProvider(global.Provider, cfg.DefaultProvider)
 	switch command {
 	case "setupvm":
-		return runSetupVM(ctx, app, cfg.Stdout, cfg.Stderr, global.Output, global.WorkDir, providerOverride, args[1:])
+		return runSetupVM(ctx, apps.Bootstrap, cfg.Stdout, cfg.Stderr, global.Output, global.WorkDir, providerOverride, args[1:])
 	case "upgradevm":
-		state, err := app.UpgradeVM(ctx, global.WorkDir, providerOverride)
+		state, err := apps.Bootstrap.UpgradeVM(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "config":
-		return runConfig(ctx, app, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
+		return runConfig(ctx, apps.Bootstrap, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
 	case "init":
-		state, err := app.Init(ctx, global.WorkDir, providerOverride)
+		state, err := apps.Packages.Init(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "dev":
-		state, err := app.Dev(ctx, global.WorkDir, providerOverride)
+		state, err := apps.Packages.Dev(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "pack":
 		if len(args) < 2 {
-			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "cli.Run", Message: "pack output path is required"}
+			return writeUsage(cfg.Stdout, global.Output, "pack output path is required", "pack <output.spk>")
 		}
-		state, err := app.Pack(ctx, global.WorkDir, args[1], providerOverride)
+		state, err := apps.Packages.Pack(ctx, global.WorkDir, args[1], providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "verify":
 		if len(args) < 2 {
-			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "cli.Run", Message: "verify spk path is required"}
+			return writeUsage(cfg.Stdout, global.Output, "verify spk path is required", "verify <input.spk>")
 		}
-		state, err := app.Verify(ctx, global.WorkDir, args[1], providerOverride)
+		state, err := apps.Packages.Verify(ctx, global.WorkDir, args[1], providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "publish":
 		if len(args) < 2 {
-			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "cli.Run", Message: "publish spk path is required"}
+			return writeUsage(cfg.Stdout, global.Output, "publish spk path is required", "publish <input.spk>")
 		}
-		state, err := app.Publish(ctx, global.WorkDir, args[1], providerOverride)
+		state, err := apps.Packages.Publish(ctx, global.WorkDir, args[1], providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "keygen":
-		result, err := app.Keygen(ctx, global.WorkDir, args[1:], providerOverride)
+		result, err := apps.Keys.Keygen(ctx, global.WorkDir, args[1:], providerOverride)
 		return respond(cfg.Stdout, global.Output, result, err)
 	case "listkeys":
-		result, err := app.ListKeys(ctx, global.WorkDir, args[1:], providerOverride)
+		result, err := apps.Keys.ListKeys(ctx, global.WorkDir, args[1:], providerOverride)
 		return respond(cfg.Stdout, global.Output, result, err)
 	case "getkey":
 		if len(args) < 2 {
-			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "cli.Run", Message: "getkey key id is required"}
+			return writeUsage(cfg.Stdout, global.Output, "getkey key id is required", "getkey <key-id>")
 		}
-		result, err := app.GetKey(ctx, global.WorkDir, args[1], providerOverride)
+		result, err := apps.Keys.GetKey(ctx, global.WorkDir, args[1], providerOverride)
 		return respond(cfg.Stdout, global.Output, result, err)
 	case "enter-grain":
-		state, err := app.EnterGrain(ctx, global.WorkDir, providerOverride)
+		state, err := apps.Grains.EnterGrain(ctx, global.WorkDir, providerOverride, global.NonInter)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "vm":
 		if len(args) < 2 {
-			return errors.New("vm subcommand is required")
+			if global.Output == "json" {
+				return write(cfg.Stdout, global.Output, map[string]any{
+					"error": "vm subcommand is required",
+					"usage": "vm create|up|halt|destroy|status|provision|ssh",
+				})
+			}
+			return printVMHelp(cfg.Stdout)
 		}
-		return runVM(ctx, app, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
+		return runVM(ctx, apps.VM, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
 	default:
-		return &domain.Error{Code: domain.ErrUnsupported, Op: "cli.Run", Message: fmt.Sprintf("command %q is not implemented yet", command)}
+		return writeUsage(cfg.Stdout, global.Output, fmt.Sprintf("command %q is not implemented yet", command), "setupvm|upgradevm|config|init|dev|pack|verify|publish|keygen|listkeys|getkey|enter-grain|vm")
 	}
 }
 
@@ -155,6 +180,10 @@ func normalizeGlobalArgs(args []string) []string {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if isGlobalFlag(arg) {
+			if (arg == "--help" || arg == "--version") && len(rest) > 0 {
+				rest = append(rest, arg)
+				continue
+			}
 			global = append(global, arg)
 			if needsValue(arg) && i+1 < len(args) {
 				i++
@@ -194,42 +223,52 @@ func needsValue(arg string) bool {
 	return arg == "--work-directory" || arg == "--provider" || arg == "--log-format" || arg == "--output"
 }
 
-func runConfig(ctx context.Context, app App, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
-	if len(args) == 0 {
-		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "cli.runConfig", Message: "config subcommand is required"}
+func runConfig(ctx context.Context, app ProjectBootstrapApp, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
+	if len(args) == 0 || args[0] == "--help" {
+		return printConfigHelp(out)
+	}
+	if args[0] == "render" && len(args) > 1 && args[1] == "--help" {
+		return printConfigHelp(out)
 	}
 	switch args[0] {
 	case "render":
 		rendered, err := app.RenderConfig(ctx, workDir, providerOverride)
 		return respond(out, format, rendered, err)
 	default:
-		return &domain.Error{Code: domain.ErrUnsupported, Op: "cli.runConfig", Message: fmt.Sprintf("config subcommand %q is not supported", args[0])}
+		return writeUsage(out, format, fmt.Sprintf("config subcommand %q is not supported", args[0]), "config render")
 	}
 }
 
-func runSetupVM(ctx context.Context, app App, out, errOut io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
+func runSetupVM(ctx context.Context, app ProjectBootstrapApp, out, errOut io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
 	flags := flag.NewFlagSet("setupvm", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	force := flags.Bool("force", false, "overwrite existing setupvm-managed project files")
+	showHelp := flags.Bool("help", false, "show help")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	rest := flags.Args()
-	if len(rest) >= 1 && rest[0] == "--help" {
-		return printHelp(out, app, "setupvm")
+	if *showHelp {
+		return printSetupVMHelp(out, app)
 	}
 	if len(rest) < 1 {
 		stacks, _ := app.StackNames()
-		return write(out, format, map[string]any{
-			"error":  "stack is required",
-			"stacks": stacks,
-		})
+		return writeUsage(out, format, "stack is required", fmt.Sprintf("setupvm [--force] <stack>\nknown stacks: %s", strings.Join(stacks, ", ")))
 	}
 	state, err := app.SetupVM(ctx, workDir, providerOverride, rest[0], *force)
 	return respond(out, format, state, err)
 }
 
-func runVM(ctx context.Context, app App, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
+func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
+	if len(args) == 0 || args[0] == "--help" {
+		return printVMHelp(out)
+	}
+	switch args[0] {
+	case "create", "up", "halt", "destroy", "status", "provision", "ssh":
+		if len(args) > 1 && args[1] == "--help" {
+			return printVMHelp(out)
+		}
+	}
 	switch args[0] {
 	case "create":
 		state, err := app.VMCreate(ctx, workDir, providerOverride)
@@ -253,11 +292,11 @@ func runVM(ctx context.Context, app App, out io.Writer, format, workDir string, 
 		state, err := app.VMSSH(ctx, workDir, args[1:], providerOverride)
 		return respond(out, format, state, err)
 	default:
-		return &domain.Error{Code: domain.ErrUnsupported, Op: "cli.runVM", Message: fmt.Sprintf("vm subcommand %q is not supported", args[0])}
+		return writeUsage(out, format, fmt.Sprintf("vm subcommand %q is not supported", args[0]), "vm create|up|halt|destroy|status|provision|ssh")
 	}
 }
 
-func printHelp(out io.Writer, app App, program string) error {
+func printHelp(out io.Writer, app ProjectBootstrapApp, program string) error {
 	stacks, _ := app.StackNames()
 	_, err := fmt.Fprintf(out, `%s unifies the legacy vagrant-spk and lima-spk workflows.
 
@@ -285,6 +324,45 @@ Flags:
 
 Known stacks: %v
 `, program, stacks)
+	return err
+}
+
+func printSetupVMHelp(out io.Writer, app ProjectBootstrapApp) error {
+	stacks, _ := app.StackNames()
+	_, err := fmt.Fprintf(out, `setupvm initializes a project workspace for a stack and provider.
+
+Usage:
+  setupvm [--force] <stack>
+
+Flags:
+  --force   overwrite setupvm-managed project files
+
+Known stacks: %v
+`, stacks)
+	return err
+}
+
+func printConfigHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `config exposes generated configuration artifacts.
+
+Usage:
+  config render
+`)
+	return err
+}
+
+func printVMHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `vm manages provider instances for the current project.
+
+Usage:
+  vm create
+  vm up
+  vm halt
+  vm destroy
+  vm status
+  vm provision
+  vm ssh [args...]
+`)
 	return err
 }
 
@@ -317,6 +395,17 @@ func write(out io.Writer, format string, payload any) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+func writeUsage(out io.Writer, format, message, usage string) error {
+	if format == "json" {
+		return write(out, format, map[string]any{
+			"error": message,
+			"usage": usage,
+		})
+	}
+	_, err := fmt.Fprintf(out, "error: %s\nusage: %s\n", message, usage)
+	return err
 }
 
 func renderText(payload any) string {
