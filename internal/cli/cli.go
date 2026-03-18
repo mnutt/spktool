@@ -41,6 +41,16 @@ type GrainApp interface {
 	EnterGrain(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
 }
 
+type UtilityApp interface {
+	Add(context.Context, string, string) (*domain.ProjectState, error)
+	ListUtilities(context.Context) (*services.UtilityCatalog, error)
+	DescribeUtility(context.Context, string) (*services.UtilityDetails, error)
+}
+
+type SkillApp interface {
+	InstallSkills(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
+}
+
 type VMApp interface {
 	VMCreate(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMUp(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
@@ -56,6 +66,8 @@ type Applications struct {
 	Packages  PackageApp
 	Keys      KeyApp
 	Grains    GrainApp
+	Utility   UtilityApp
+	Skills    SkillApp
 	VM        VMApp
 }
 
@@ -155,6 +167,23 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 	case "enter-grain":
 		state, err := apps.Grains.EnterGrain(ctx, global.WorkDir, providerOverride, global.NonInter)
 		return respond(cfg.Stdout, global.Output, state, err)
+	case "list-utils":
+		catalog, err := apps.Utility.ListUtilities(ctx)
+		return respond(cfg.Stdout, global.Output, catalog, err)
+	case "describe-util":
+		if len(args) < 2 {
+			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "describe-util <name>")
+		}
+		details, err := apps.Utility.DescribeUtility(ctx, args[1])
+		return respond(cfg.Stdout, global.Output, details, err)
+	case "add":
+		if len(args) < 2 {
+			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "add <util>")
+		}
+		state, err := apps.Utility.Add(ctx, global.WorkDir, args[1])
+		return respond(cfg.Stdout, global.Output, state, err)
+	case "install-skills":
+		return runInstallSkills(ctx, apps.Skills, cfg.Stdout, cfg.Stderr, global.Output, global.WorkDir, global.NonInter, args[1:])
 	case "vm":
 		if len(args) < 2 {
 			if global.Output == "json" {
@@ -167,7 +196,7 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 		}
 		return runVM(ctx, apps.VM, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
 	default:
-		return writeUsage(cfg.Stdout, global.Output, fmt.Sprintf("command %q is not implemented yet", command), "setupvm|upgradevm|config|init|dev|pack|verify|publish|keygen|listkeys|getkey|enter-grain|vm")
+		return writeUsage(cfg.Stdout, global.Output, fmt.Sprintf("command %q is not implemented yet", command), "setupvm|upgradevm|config|init|dev|pack|verify|publish|keygen|listkeys|getkey|enter-grain|list-utils|describe-util|add|install-skills|vm")
 	}
 }
 
@@ -259,6 +288,28 @@ func runSetupVM(ctx context.Context, app ProjectBootstrapApp, out, errOut io.Wri
 	return respond(out, format, state, err)
 }
 
+func runInstallSkills(ctx context.Context, app SkillApp, out, errOut io.Writer, format, workDir string, nonInteractive bool, args []string) error {
+	flags := flag.NewFlagSet("install-skills", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	codex := flags.Bool("codex", false, "install Codex skill files into .codex/skills")
+	claude := flags.Bool("claude", false, "install Claude Code skill files into .claude/skills")
+	force := flags.Bool("force", false, "overwrite existing installed skill files")
+	showHelp := flags.Bool("help", false, "show help")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *showHelp {
+		return printInstallSkillsHelp(out)
+	}
+	result, err := app.InstallSkills(ctx, workDir, services.InstallSkillsRequest{
+		Codex:          *codex,
+		Claude:         *claude,
+		Force:          *force,
+		NonInteractive: nonInteractive,
+	})
+	return respond(out, format, result, err)
+}
+
 func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
 	if len(args) == 0 || args[0] == "--help" {
 		return printVMHelp(out)
@@ -313,6 +364,10 @@ Commands:
   listkeys [args...]
   getkey <key-id>
   enter-grain
+  list-utils
+  describe-util <name>
+  add <util>
+  install-skills [--codex] [--claude] [--force]
   vm create|up|halt|destroy|status|provision|ssh
 
 Flags:
@@ -362,6 +417,20 @@ Usage:
   vm status
   vm provision
   vm ssh [args...]
+`)
+	return err
+}
+
+func printInstallSkillsHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `install-skills exports agent skill files into the current project.
+
+Usage:
+  install-skills [--codex] [--claude] [--force]
+
+Flags:
+  --codex    install Codex skill files into .codex/skills
+  --claude   install Claude Code skill files into .claude/skills
+  --force    overwrite existing installed skill files
 `)
 	return err
 }
@@ -428,6 +497,55 @@ func renderText(payload any) string {
 			parts = append(parts, fmt.Sprintf("== %s ==\n%s", file.Path, strings.TrimRight(file.Body, "\n")))
 		}
 		return strings.Join(parts, "\n\n")
+	case *services.UtilityCatalog:
+		if v == nil {
+			return ""
+		}
+		lines := make([]string, 0, len(v.Utilities))
+		for _, utility := range v.Utilities {
+			if strings.TrimSpace(utility.Summary) == "" {
+				lines = append(lines, utility.Name)
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s - %s", utility.Name, utility.Summary))
+		}
+		return strings.Join(lines, "\n")
+	case *services.UtilityDetails:
+		if v == nil {
+			return ""
+		}
+		parts := []string{v.Utility.Name}
+		if strings.TrimSpace(v.Utility.Description) != "" {
+			parts = append(parts, v.Utility.Description)
+		} else if strings.TrimSpace(v.Utility.Summary) != "" {
+			parts = append(parts, v.Utility.Summary)
+		}
+		if len(v.Utility.Examples) > 0 {
+			parts = append(parts, "Examples:")
+			for _, example := range v.Utility.Examples {
+				parts = append(parts, "  "+example)
+			}
+		}
+		if len(parts) <= 2 {
+			return strings.Join(parts, "\n\n")
+		}
+		body := append([]string{}, parts[:2]...)
+		body = append(body, "")
+		body = append(body, parts[2:]...)
+		return strings.Join(body, "\n")
+	case *services.InstallSkillsResult:
+		if v == nil {
+			return ""
+		}
+		lines := make([]string, 0, len(v.Targets)+len(v.Files)+1)
+		if len(v.Targets) > 0 {
+			lines = append(lines, "targets: "+strings.Join(v.Targets, ", "))
+		}
+		lines = append(lines, v.Files...)
+		if v.GitignoreUpdated {
+			lines = append(lines, ".gitignore updated")
+		}
+		return strings.Join(lines, "\n")
 	case map[string]any:
 		return fmt.Sprintf("%v", v)
 	default:

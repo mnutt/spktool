@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,8 @@ type serviceDeps struct {
 	templates *templates.Repository
 	providers *providers.Registry
 	keyring   keys.Manager
+	http      HTTPClient
+	lookPath  func(string) error
 }
 
 type ProjectBootstrapService struct {
@@ -57,28 +60,57 @@ type VMLifecycleService struct {
 	deps *serviceDeps
 }
 
+type UtilityService struct {
+	deps *serviceDeps
+}
+
+type SkillService struct {
+	deps *serviceDeps
+}
+
 type Services struct {
 	ProjectBootstrap *ProjectBootstrapService
 	Package          *PackageService
 	Grain            *GrainService
 	Key              *KeyService
+	Utility          *UtilityService
+	Skill            *SkillService
 	VM               *VMLifecycleService
 }
 
 func NewServices(logger *slog.Logger, repo *templates.Repository, registry *providers.Registry, keyring keys.Manager) *Services {
+	return NewServicesWithHTTPClient(logger, repo, registry, keyring, http.DefaultClient)
+}
+
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func NewServicesWithHTTPClient(logger *slog.Logger, repo *templates.Repository, registry *providers.Registry, keyring keys.Manager, httpClient HTTPClient) *Services {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
 	deps := &serviceDeps{
 		logger:    logger,
 		templates: repo,
 		providers: registry,
 		keyring:   keyring,
+		http:      httpClient,
+		lookPath:  defaultLookPath,
 	}
 	return &Services{
 		ProjectBootstrap: &ProjectBootstrapService{deps: deps},
 		Package:          &PackageService{deps: deps},
 		Grain:            &GrainService{deps: deps},
 		Key:              &KeyService{deps: deps},
+		Utility:          &UtilityService{deps: deps},
+		Skill:            &SkillService{deps: deps},
 		VM:               &VMLifecycleService{deps: deps},
 	}
+}
+
+func (d *serviceDeps) hasOnPath(name string) bool {
+	return d.lookPath != nil && d.lookPath(name) == nil
 }
 
 func (d *serviceDeps) loadResolvedProject(_ context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, *config.Resolved, error) {

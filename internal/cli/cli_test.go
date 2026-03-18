@@ -16,6 +16,10 @@ type fakeApp struct {
 	setupVM    func(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
 	renderCfg  func(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
 	dev        func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	add        func(context.Context, string, string) (*domain.ProjectState, error)
+	listUtils  func(context.Context) (*services.UtilityCatalog, error)
+	describe   func(context.Context, string) (*services.UtilityDetails, error)
+	install    func(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
 	pack       func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	verify     func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	publish    func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
@@ -44,6 +48,18 @@ func (a *fakeApp) Init(context.Context, string, domain.ProviderName) (*domain.Pr
 }
 func (a *fakeApp) Dev(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.dev(ctx, workDir, provider)
+}
+func (a *fakeApp) Add(ctx context.Context, workDir, util string) (*domain.ProjectState, error) {
+	return a.add(ctx, workDir, util)
+}
+func (a *fakeApp) ListUtilities(ctx context.Context) (*services.UtilityCatalog, error) {
+	return a.listUtils(ctx)
+}
+func (a *fakeApp) DescribeUtility(ctx context.Context, name string) (*services.UtilityDetails, error) {
+	return a.describe(ctx, name)
+}
+func (a *fakeApp) InstallSkills(ctx context.Context, workDir string, req services.InstallSkillsRequest) (*services.InstallSkillsResult, error) {
+	return a.install(ctx, workDir, req)
 }
 func (a *fakeApp) Pack(ctx context.Context, workDir, output string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.pack(ctx, workDir, output, provider)
@@ -95,6 +111,8 @@ func appSet(app *fakeApp) Applications {
 		Packages:  app,
 		Keys:      app,
 		Grains:    app,
+		Utility:   app,
+		Skills:    app,
 		VM:        app,
 	}
 }
@@ -268,6 +286,148 @@ func TestRunDevUsesAliasDefaultProvider(t *testing.T) {
 	}
 	if gotProvider != domain.ProviderLima {
 		t.Fatalf("expected alias default provider, got %q", gotProvider)
+	}
+}
+
+func TestRunAddDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotWorkDir string
+	var gotUtil string
+	app := &fakeApp{
+		stacks: []string{"node"},
+		add: func(_ context.Context, workDir, util string) (*domain.ProjectState, error) {
+			gotWorkDir = workDir
+			gotUtil = util
+			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "node", VMInstance: "sandstorm-demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args:    []string{"--work-directory", "/workspace/app", "add", "foo"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWorkDir != "/workspace/app" || gotUtil != "foo" {
+		t.Fatalf("unexpected add args: workdir=%q util=%q", gotWorkDir, gotUtil)
+	}
+	if got := stdout.String(); got != "provider=lima stack=node vm=sandstorm-demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunListUtilsDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	app := &fakeApp{
+		stacks: []string{"node"},
+		listUtils: func(_ context.Context) (*services.UtilityCatalog, error) {
+			return &services.UtilityCatalog{
+				Utilities: []services.UtilitySpec{{
+					Name:    "stay-awake",
+					Summary: "keep the grain awake",
+				}},
+			}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args:    []string{"list-utils"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "stay-awake - keep the grain awake\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunDescribeUtilDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	app := &fakeApp{
+		stacks: []string{"node"},
+		describe: func(_ context.Context, name string) (*services.UtilityDetails, error) {
+			if name != "stay-awake" {
+				t.Fatalf("unexpected utility name: %q", name)
+			}
+			return &services.UtilityDetails{
+				Utility: services.UtilitySpec{
+					Name:        "stay-awake",
+					Summary:     "Wake-lock helper",
+					Description: "Acquire, renew, and release Sandstorm wake-lock leases.",
+					Examples: []string{
+						"stay-awake acquire <sessionId>",
+						"stay-awake release <lockId>",
+					},
+				},
+			}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args:    []string{"describe-util", "stay-awake"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stdout.String()
+	if !bytes.Contains([]byte(got), []byte("stay-awake")) ||
+		!bytes.Contains([]byte(got), []byte("Acquire, renew, and release Sandstorm wake-lock leases.")) ||
+		!bytes.Contains([]byte(got), []byte("Examples:")) {
+		t.Fatalf("unexpected output: %q", got)
+	}
+	if bytes.Contains([]byte(got), []byte("Wake-lock helper")) {
+		t.Fatalf("expected summary to be omitted from describe output, got %q", got)
+	}
+}
+
+func TestRunDescribeUtilRequiresName(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"node"}}), Config{
+		Program: "spktool",
+		Args:    []string{"describe-util"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "error: utility name is required\nusage: describe-util <name>\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunAddRequiresUtilName(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"node"}}), Config{
+		Program: "spktool",
+		Args:    []string{"add"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "error: utility name is required\nusage: add <util>\n" {
+		t.Fatalf("unexpected output: %q", got)
 	}
 }
 
@@ -951,5 +1111,62 @@ func TestRunVMUnknownSubcommandShowsUsage(t *testing.T) {
 	}
 	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: vm create|up|halt|destroy|status|provision|ssh")) {
 		t.Fatalf("expected vm usage output, got %q", got)
+	}
+}
+
+func TestRunInstallSkillsDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotWorkDir string
+	var gotReq services.InstallSkillsRequest
+	app := &fakeApp{
+		stacks: []string{"lemp"},
+		install: func(_ context.Context, workDir string, req services.InstallSkillsRequest) (*services.InstallSkillsResult, error) {
+			gotWorkDir = workDir
+			gotReq = req
+			return &services.InstallSkillsResult{
+				Targets:          []string{"codex", "claude"},
+				Files:            []string{".codex/skills/sandstorm-app-author/SKILL.md"},
+				GitignoreUpdated: true,
+			}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args:    []string{"--work-directory", "/tmp/demo", "--noninteractive", "install-skills", "--codex", "--claude", "--force"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotWorkDir != "/tmp/demo" {
+		t.Fatalf("unexpected workdir: %q", gotWorkDir)
+	}
+	if !gotReq.Codex || !gotReq.Claude || !gotReq.Force || !gotReq.NonInteractive {
+		t.Fatalf("unexpected request: %+v", gotReq)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("targets: codex")) {
+		t.Fatalf("expected install output, got %q", got)
+	}
+}
+
+func TestRunInstallSkillsHelpShowsUsage(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"install-skills", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("install-skills [--codex] [--claude] [--force]")) {
+		t.Fatalf("expected install-skills help output, got %q", got)
 	}
 }

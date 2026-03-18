@@ -26,6 +26,10 @@ typed workflows, and a stable project state file.
   and provider defaults.
 - `.sandstorm/box.local.toml` is for machine-local overrides such as the default
   provider.
+- `.sandstorm/utils.toml` is a tool-managed record of installed utility
+  versions for `spktool add`.
+- `.sandstorm/utils/*` contains installed utility binaries for the current
+  project.
 - `.sandstorm/.generated/*` is disposable output produced by `setupvm` and
   `upgradevm`.
 - Provider files like `lima.yaml` and `Vagrantfile` should not be edited by
@@ -38,6 +42,10 @@ spktool setupvm node --provider lima
 spktool config render --provider lima
 spktool vm create --provider lima
 spktool init --provider lima
+spktool install-skills --codex
+spktool list-utils
+spktool describe-util stay-awake
+spktool add stay-awake
 ```
 
 `spktool config render` prints the resolved generated artifacts without
@@ -46,6 +54,66 @@ requiring the VM to exist.
 `spktool vm create` starts a VM and runs provisioning. `spktool vm up` starts an
 existing VM without reprovisioning, and `spktool vm provision` reruns guest
 setup explicitly.
+
+## Agent Skills
+
+`spktool install-skills --codex` installs the embedded Sandstorm Codex skill to
+`.codex/skills/sandstorm-app-author/` in the current project.
+
+`spktool install-skills --claude` installs the embedded Claude Code skill to
+`.claude/skills/sandstorm-app-author/` in the current project.
+
+The command also adds `.codex/skills/sandstorm-app-author/` to the repo root
+`.gitignore` if that exact generated path is not already ignored. Claude
+installs similarly add `.claude/skills/sandstorm-app-author/`.
+
+## Utilities
+
+`spktool list-utils` fetches the latest `sandstorm-utils` release metadata,
+downloads its `utils.json` catalog, and prints each utility name with its
+summary.
+
+`spktool describe-util <name>` fetches the same catalog, finds the matching
+utility by name, and prints its summary, description, and examples.
+
+`spktool add <util>` requires an initialized `.sandstorm` project. It fetches
+the latest release catalog, verifies that `<util>` exists in `utils.json`,
+downloads `sandstorm-utils_<tag>_linux_amd64.tar.gz`, extracts `bin/<util>`,
+installs it to `.sandstorm/utils/<util>`, and records the
+release tag in `.sandstorm/utils.toml`.
+
+## Building
+
+This repo has a single Go entrypoint at `cmd/spktool`.
+
+Build the main binary:
+
+```sh
+GOCACHE=/tmp/go-build go build -o ./bin/spktool ./cmd/spktool
+```
+
+Run it directly from the repo without creating a binary first:
+
+```sh
+GOCACHE=/tmp/go-build go run ./cmd/spktool --help
+```
+
+If you want compatibility with the legacy command names, build `spktool` once
+and add symlinks:
+
+```sh
+mkdir -p ./bin
+GOCACHE=/tmp/go-build go build -o ./bin/spktool ./cmd/spktool
+ln -sf spktool ./bin/lima-spk
+ln -sf spktool ./bin/vagrant-spk
+```
+
+Those aliases change the default provider based on `argv[0]`, so:
+
+```sh
+./bin/lima-spk dev
+./bin/vagrant-spk dev
+```
 
 ## Lima Notes
 

@@ -54,3 +54,31 @@ func (r *Repository) BoxFile(file string) ([]byte, error) {
 func (r *Repository) HelperFile(file string) ([]byte, error) {
 	return r.ReadFile(filepath.ToSlash(filepath.Join("helpers", file)))
 }
+
+func (r *Repository) SkillFile(name, file string) ([]byte, error) {
+	return r.ReadFile(filepath.ToSlash(filepath.Join("skills", name, file)))
+}
+
+func (r *Repository) SkillFiles(name string) ([]string, error) {
+	root := filepath.ToSlash(filepath.Join("skills", name))
+	files := make([]string, 0)
+	err := fs.WalkDir(r.fs, root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}

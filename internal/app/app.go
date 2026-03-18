@@ -50,6 +50,8 @@ func Run(ctx context.Context, argv []string) int {
 		Packages:  serviceSet.Package,
 		Keys:      serviceSet.Key,
 		Grains:    serviceSet.Grain,
+		Utility:   serviceSet.Utility,
+		Skills:    serviceSet.Skill,
 		VM:        serviceSet.VM,
 	}, cli.Config{
 		Program:         program,

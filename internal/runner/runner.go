@@ -52,7 +52,25 @@ type CommandError struct {
 }
 
 func (e *CommandError) Error() string {
-	return fmt.Sprintf("command %q failed: %v", e.Result.Command, e.Err)
+	base := fmt.Sprintf("command %q failed", e.Result.Command)
+	if e.Result.ExitCode != 0 {
+		base = fmt.Sprintf("%s with exit code %d", base, e.Result.ExitCode)
+	}
+
+	stderr := strings.TrimSpace(e.Result.Stderr)
+	stdout := strings.TrimSpace(e.Result.Stdout)
+	switch {
+	case stderr != "" && stdout != "":
+		return fmt.Sprintf("%s\nstderr:\n%s\nstdout:\n%s", base, stderr, stdout)
+	case stderr != "":
+		return fmt.Sprintf("%s\nstderr:\n%s", base, stderr)
+	case stdout != "":
+		return fmt.Sprintf("%s\nstdout:\n%s", base, stdout)
+	case e.Err != nil:
+		return fmt.Sprintf("%s: %v", base, e.Err)
+	default:
+		return base
+	}
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }

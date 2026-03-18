@@ -28,7 +28,7 @@ func (s *VMLifecycleService) VMCreate(ctx context.Context, workDir string, provi
 	project := s.deps.projectContext(workDir, projectState, resolved)
 	status, err := plugin.Status(ctx, project)
 	if err != nil {
-		return nil, err
+		return nil, wrapProviderStatusError("services.VMCreate", projectState.Provider, err)
 	}
 	if vmStateExists(status.State) {
 		return nil, &domain.Error{
@@ -73,7 +73,11 @@ func (s *VMLifecycleService) VMStatus(ctx context.Context, workDir string, provi
 	if err != nil {
 		return providers.Status{}, err
 	}
-	return plugin.Status(ctx, s.deps.projectContext(workDir, projectState, resolved))
+	status, err := plugin.Status(ctx, s.deps.projectContext(workDir, projectState, resolved))
+	if err != nil {
+		return providers.Status{}, wrapProviderStatusError("services.VMStatus", projectState.Provider, err)
+	}
+	return status, nil
 }
 
 func (s *VMLifecycleService) VMProvision(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -105,4 +109,11 @@ func vmStateExists(state string) bool {
 	default:
 		return true
 	}
+}
+
+func wrapProviderStatusError(op string, provider domain.ProviderName, err error) error {
+	return domain.Wrap(domain.ErrExternal, op,
+		fmt.Sprintf("provider status lookup failed for %s; if running inside a sandbox, rerun elevated before trusting VM state", provider),
+		err,
+	)
 }

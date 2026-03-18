@@ -1,11 +1,17 @@
 package services_test
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,24 +143,86 @@ type testServices struct {
 	*services.PackageService
 	*services.GrainService
 	*services.KeyService
+	*services.UtilityService
+	*services.SkillService
 	*services.VMLifecycleService
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func newService(t *testing.T, plugin providers.Plugin, home string) *testServices {
+	return newServiceWithHTTPClient(t, plugin, home, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected HTTP request: " + req.URL.String())
+	})})
+}
+
+func newServiceWithHTTPClient(t *testing.T, plugin providers.Plugin, home string, httpClient *http.Client) *testServices {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := services.NewServices(
+	svc := services.NewServicesWithHTTPClient(
 		logger,
 		templates.New(),
 		providers.NewRegistry(plugin),
 		keys.NewLocalKeyring(home),
+		httpClient,
 	)
 	return &testServices{
 		ProjectBootstrapService: svc.ProjectBootstrap,
 		PackageService:          svc.Package,
 		GrainService:            svc.Grain,
 		KeyService:              svc.Key,
+		UtilityService:          svc.Utility,
+		SkillService:            svc.Skill,
 		VMLifecycleService:      svc.VM,
+	}
+}
+
+func jsonResponse(t *testing.T, status int, body any) *http.Response {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Body:       io.NopCloser(bytes.NewReader(data)),
+		Header:     make(http.Header),
+	}
+}
+
+func tarballResponse(t *testing.T, status int, files map[string]string) *http.Response {
+	t.Helper()
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o755,
+			Size: int64(len(body)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Body:       io.NopCloser(bytes.NewReader(archive.Bytes())),
+		Header:     make(http.Header),
 	}
 }
 
@@ -216,6 +284,445 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 	}
 	if got := string(loaded); !strings.Contains(got, `provider = "lima"`) {
 		t.Fatalf("unexpected local config: %q", got)
+	}
+}
+
+func TestAddRequiresInitializedProject(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	svc := newService(t, plugin, home)
+
+	_, err := svc.Add(context.Background(), workDir, "foo")
+	if err == nil {
+		t.Fatal("expected missing project error")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected domain error, got %T", err)
+	}
+	if domainErr.Code != domain.ErrNotFound {
+		t.Fatalf("unexpected error: %+v", domainErr)
+	}
+}
+
+func TestAddInstallsUtilityAndTracksVersion(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{
+					{
+						"name":                 "utils.json",
+						"browser_download_url": "https://downloads.example/utils.json",
+					},
+					{
+						"name":                 "sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+						"browser_download_url": "https://downloads.example/sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+					},
+				},
+			}), nil
+		case "https://downloads.example/utils.json":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 1,
+				"utilities": []map[string]string{{
+					"name":        "foo",
+					"summary":     "utility foo",
+					"description": "utility foo description",
+				}},
+			}), nil
+		case "https://downloads.example/sandstorm-utils_v0.1.0_linux_amd64.tar.gz":
+			return tarballResponse(t, http.StatusOK, map[string]string{
+				"sandstorm-utils_v0.1.0_linux_amd64/bin/foo": "#!/bin/sh\necho from foo\n",
+				"sandstorm-utils_v0.1.0_linux_amd64/bin/bar": "#!/bin/sh\necho from bar\n",
+			}), nil
+		default:
+			return nil, errors.New("unexpected request: " + req.URL.String())
+		}
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, home, client)
+
+	state, err := svc.Add(context.Background(), workDir, "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Provider != domain.ProviderLima || state.Stack != "node" {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+
+	body, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "utils", "foo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != "#!/bin/sh\necho from foo\n" {
+		t.Fatalf("unexpected utility body: %q", got)
+	}
+	info, err := os.Stat(filepath.Join(workDir, ".sandstorm", "utils", "foo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("expected installed utility to be executable, got %o", info.Mode().Perm())
+	}
+
+	utilsCfg, err := config.LoadUtils(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := utilsCfg.Installed["foo"]; got != "v0.1.0" {
+		t.Fatalf("unexpected installed version: %q", got)
+	}
+}
+
+func TestAddOverwritesExistingUtility(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm", "utils"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "utils", "foo"), []byte("old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest" {
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{
+					{
+						"name":                 "utils.json",
+						"browser_download_url": "https://downloads.example/utils.json",
+					},
+					{
+						"name":                 "sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+						"browser_download_url": "https://downloads.example/sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+					},
+				},
+			}), nil
+		}
+		if req.URL.String() == "https://downloads.example/utils.json" {
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 1,
+				"utilities": []map[string]string{{
+					"name":        "foo",
+					"summary":     "utility foo",
+					"description": "utility foo description",
+				}},
+			}), nil
+		}
+		return tarballResponse(t, http.StatusOK, map[string]string{
+			"release/bin/foo": "new\n",
+		}), nil
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, home, client)
+
+	if _, err := svc.Add(context.Background(), workDir, "foo"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "utils", "foo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body); got != "new\n" {
+		t.Fatalf("unexpected overwritten body: %q", got)
+	}
+}
+
+func TestAddFailsWhenExpectedAssetIsMissing(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(t, http.StatusOK, map[string]any{
+			"tag_name": "v0.1.0",
+			"assets": []map[string]string{{
+				"name":                 "different.tar.gz",
+				"browser_download_url": "https://downloads.example/different.tar.gz",
+			}},
+		}), nil
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, home, client)
+
+	_, err := svc.Add(context.Background(), workDir, "foo")
+	if err == nil {
+		t.Fatal("expected missing asset error")
+	}
+	if !strings.Contains(err.Error(), `does not contain asset "utils.json"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAddFailsWhenUtilityIsMissingFromManifest(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest" {
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{{
+					"name":                 "utils.json",
+					"browser_download_url": "https://downloads.example/utils.json",
+				}},
+			}), nil
+		}
+		return jsonResponse(t, http.StatusOK, map[string]any{
+			"version": 1,
+			"utilities": []map[string]string{{
+				"name":        "bar",
+				"summary":     "utility bar",
+				"description": "utility bar description",
+			}},
+		}), nil
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, home, client)
+
+	_, err := svc.Add(context.Background(), workDir, "foo")
+	if err == nil {
+		t.Fatal("expected missing utility error")
+	}
+	if !strings.Contains(err.Error(), `utility "foo" was not found in utils.json`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, ".sandstorm", config.UtilsFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected utils.toml to be absent after failed install, got %v", statErr)
+	}
+}
+
+func TestAddFailsWhenBinaryIsMissingFromArchive(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	if err := os.MkdirAll(filepath.Join(workDir, ".sandstorm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile), config.InitialProject("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", config.LocalFile), config.InitialLocal(domain.ProviderLima), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{
+					{
+						"name":                 "utils.json",
+						"browser_download_url": "https://downloads.example/utils.json",
+					},
+					{
+						"name":                 "sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+						"browser_download_url": "https://downloads.example/sandstorm-utils_v0.1.0_linux_amd64.tar.gz",
+					},
+				},
+			}), nil
+		case "https://downloads.example/utils.json":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 1,
+				"utilities": []map[string]string{{
+					"name":        "foo",
+					"summary":     "utility foo",
+					"description": "utility foo description",
+				}},
+			}), nil
+		default:
+			return tarballResponse(t, http.StatusOK, map[string]string{
+				"release/bin/bar": "bar\n",
+			}), nil
+		}
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, home, client)
+
+	_, err := svc.Add(context.Background(), workDir, "foo")
+	if err == nil {
+		t.Fatal("expected missing binary error")
+	}
+	if !strings.Contains(err.Error(), `binary "foo" was not found`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, ".sandstorm", config.UtilsFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("expected utils.toml to be absent after failed install, got %v", statErr)
+	}
+}
+
+func TestListUtilitiesReturnsManifestCatalog(t *testing.T) {
+	t.Parallel()
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{{
+					"name":                 "utils.json",
+					"browser_download_url": "https://downloads.example/utils.json",
+				}},
+			}), nil
+		case "https://downloads.example/utils.json":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 1,
+				"utilities": []map[string]any{{
+					"name":        "stay-awake",
+					"summary":     "wake-lock helper",
+					"description": "Acquire, renew, and release Sandstorm wake-lock leases.",
+					"examples":    []string{"stay-awake acquire <sessionId>"},
+				}},
+			}), nil
+		default:
+			return nil, errors.New("unexpected request: " + req.URL.String())
+		}
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, t.TempDir(), client)
+
+	catalog, err := svc.ListUtilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.ReleaseTag != "v0.1.0" || catalog.Version != 1 {
+		t.Fatalf("unexpected catalog metadata: %+v", catalog)
+	}
+	if len(catalog.Utilities) != 1 || catalog.Utilities[0].Name != "stay-awake" || catalog.Utilities[0].Description == "" {
+		t.Fatalf("unexpected catalog utilities: %+v", catalog.Utilities)
+	}
+}
+
+func TestDescribeUtilityReturnsDetails(t *testing.T) {
+	t.Parallel()
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{{
+					"name":                 "utils.json",
+					"browser_download_url": "https://downloads.example/utils.json",
+				}},
+			}), nil
+		case "https://downloads.example/utils.json":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 1,
+				"utilities": []map[string]any{{
+					"name":        "stay-awake",
+					"summary":     "wake-lock helper",
+					"description": "Acquire, renew, and release Sandstorm wake-lock leases.",
+					"examples":    []string{"stay-awake acquire <sessionId>", "stay-awake release <lockId>"},
+				}},
+			}), nil
+		default:
+			return nil, errors.New("unexpected request: " + req.URL.String())
+		}
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, t.TempDir(), client)
+
+	details, err := svc.DescribeUtility(context.Background(), "stay-awake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if details.ReleaseTag != "v0.1.0" || details.Version != 1 {
+		t.Fatalf("unexpected details metadata: %+v", details)
+	}
+	if details.Utility.Name != "stay-awake" || len(details.Utility.Examples) != 2 {
+		t.Fatalf("unexpected utility details: %+v", details.Utility)
+	}
+}
+
+func TestListUtilitiesRejectsUnsupportedManifestVersion(t *testing.T) {
+	t.Parallel()
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "sandstorm-app-1234"}
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case "https://api.github.com/repos/mnutt/sandstorm-utils/releases/latest":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"tag_name": "v0.1.0",
+				"assets": []map[string]string{{
+					"name":                 "utils.json",
+					"browser_download_url": "https://downloads.example/utils.json",
+				}},
+			}), nil
+		case "https://downloads.example/utils.json":
+			return jsonResponse(t, http.StatusOK, map[string]any{
+				"version": 99,
+				"utilities": []map[string]any{{
+					"name":    "stay-awake",
+					"summary": "wake-lock helper",
+				}},
+			}), nil
+		default:
+			return nil, errors.New("unexpected request: " + req.URL.String())
+		}
+	})}
+	svc := newServiceWithHTTPClient(t, plugin, t.TempDir(), client)
+
+	_, err := svc.ListUtilities(context.Background())
+	if err == nil {
+		t.Fatal("expected unsupported schema error")
+	}
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected domain error, got %T", err)
+	}
+	if domainErr.Code != domain.ErrUnsupported {
+		t.Fatalf("unexpected error: %+v", domainErr)
 	}
 }
 
@@ -499,6 +1006,7 @@ func TestUpgradeVMRewritesBootstrapFiles(t *testing.T) {
 	if !strings.Contains(string(runtimeEnv), "SANDSTORM_GUEST_PORT=6090") {
 		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
 	}
+
 }
 
 func TestUpgradeVMLegacyProjectWritesRuntimeEnv(t *testing.T) {
@@ -540,6 +1048,152 @@ func TestUpgradeVMLegacyProjectWritesRuntimeEnv(t *testing.T) {
 	}
 	if !strings.Contains(string(runtimeEnv), "SANDSTORM_WILDCARD_HOST=*.local.sandstorm.io:6090") {
 		t.Fatalf("unexpected runtime env: %q", string(runtimeEnv))
+	}
+
+}
+
+func TestInstallSkillsInstallsCodexSkillAndUpdatesGitignore(t *testing.T) {
+	workDir := t.TempDir()
+	home := t.TempDir()
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "demo"}
+	svc := newService(t, plugin, home)
+
+	result, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Targets) != 1 || result.Targets[0] != "codex" {
+		t.Fatalf("unexpected targets: %+v", result.Targets)
+	}
+	if !result.GitignoreUpdated {
+		t.Fatal("expected .gitignore to be updated")
+	}
+
+	skillData, err := os.ReadFile(filepath.Join(workDir, ".codex", "skills", "sandstorm-app-author", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(skillData), "Sandstorm App Author") {
+		t.Fatalf("unexpected skill content: %q", string(skillData))
+	}
+
+	gitignoreData, err := os.ReadFile(filepath.Join(workDir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(gitignoreData); got != ".codex/skills/sandstorm-app-author/\n" {
+		t.Fatalf("unexpected .gitignore contents: %q", got)
+	}
+}
+
+func TestInstallSkillsAppendsGitignoreRuleOnce(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "demo"}
+	svc := newService(t, plugin, home)
+
+	if err := os.WriteFile(filepath.Join(workDir, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{Codex: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{Codex: true, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	gitignoreData, err := os.ReadFile(filepath.Join(workDir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(gitignoreData); got != "node_modules/\n.codex/skills/sandstorm-app-author/\n" {
+		t.Fatalf("unexpected .gitignore contents: %q", got)
+	}
+}
+
+func TestInstallSkillsInstallsClaudeSkillAndUpdatesGitignore(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "demo"}
+	svc := newService(t, plugin, home)
+
+	result, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{Claude: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Targets) != 1 || result.Targets[0] != "claude" {
+		t.Fatalf("unexpected targets: %+v", result.Targets)
+	}
+
+	skillData, err := os.ReadFile(filepath.Join(workDir, ".claude", "skills", "sandstorm-app-author", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(skillData), "Sandstorm App Author") {
+		t.Fatalf("unexpected skill content: %q", string(skillData))
+	}
+
+	gitignoreData, err := os.ReadFile(filepath.Join(workDir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(gitignoreData); got != ".claude/skills/sandstorm-app-author/\n" {
+		t.Fatalf("unexpected .gitignore contents: %q", got)
+	}
+}
+
+func TestInstallSkillsAutoDetectsClaudeWhenCodexIsUnavailable(t *testing.T) {
+	workDir := t.TempDir()
+	home := t.TempDir()
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "demo"}
+	svc := newService(t, plugin, home)
+
+	result, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Targets) != 1 || result.Targets[0] != "claude" {
+		t.Fatalf("unexpected targets: %+v", result.Targets)
+	}
+}
+
+func TestInstallSkillsAutoDetectsBothTargets(t *testing.T) {
+	workDir := t.TempDir()
+	home := t.TempDir()
+	pathDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pathDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pathDir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "demo"}
+	svc := newService(t, plugin, home)
+
+	result, err := svc.InstallSkills(context.Background(), workDir, services.InstallSkillsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Targets) != 2 || result.Targets[0] != "codex" || result.Targets[1] != "claude" {
+		t.Fatalf("unexpected targets: %+v", result.Targets)
 	}
 }
 
@@ -819,6 +1473,69 @@ func TestVMStatusUsesProviderOverrideInResolvedContext(t *testing.T) {
 	}
 	if vagrantPlugin.lastActionCtx.Config == nil || vagrantPlugin.lastActionCtx.Config.Provider != domain.ProviderVagrant {
 		t.Fatalf("expected provider override to reach status context: %+v", vagrantPlugin.lastActionCtx.Config)
+	}
+}
+
+func TestPackIncludesGuestCommandStderrInWorkflowError(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		execErr: &runner.CommandError{
+			Result: runner.Result{
+				Command:  "limactl shell --workdir /opt/app sandstorm-app-1234 bash -lc ...",
+				ExitCode: 1,
+				Stderr:   "bad alwaysInclude paths\nCap'n Proto parse error",
+			},
+			Err: &exec.ExitError{},
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "node", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Pack(context.Background(), workDir, filepath.Join(workDir, "out.spk"), "")
+	if err == nil {
+		t.Fatal("expected pack error")
+	}
+	if !strings.Contains(err.Error(), "bad alwaysInclude paths") {
+		t.Fatalf("expected guest stderr in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Cap'n Proto parse error") {
+		t.Fatalf("expected guest stderr details in error, got %v", err)
+	}
+}
+
+func TestVMStatusWrapsProviderLookupErrorsWithSandboxHint(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusErr:      errors.New("permission denied"),
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "node", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.VMStatus(context.Background(), workDir, "")
+	if err == nil {
+		t.Fatal("expected vm status error")
+	}
+	if !strings.Contains(err.Error(), "rerun elevated") {
+		t.Fatalf("expected sandbox hint in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "provider status lookup failed") {
+		t.Fatalf("expected status lookup context in error, got %v", err)
 	}
 }
 

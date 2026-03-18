@@ -14,12 +14,12 @@ hostname localhost
 . /opt/app/.sandstorm/.generated/runtime.env
 
 # Grub updates don't silent install well
-apt-mark hold grub-pc
+apt-mark hold grub-pc || true
 apt-get update
 apt-get upgrade -y
 
 # Install curl needed below, and gnupg for package signing
-apt-get install -y curl gnupg
+apt-get install -y curl gnupg netcat-openbsd
 
 # The following line copies stderr through stderr to cat without accidentally leaving it in the
 # output file. Be careful when changing. See: https://github.com/sandstorm-io/vagrant-spk/pull/159
