@@ -187,7 +187,7 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 	case "vm":
 		if len(args) < 2 {
 			if global.Output == "json" {
-				return write(cfg.Stdout, global.Output, map[string]any{
+				return writePayload(cfg.Stdout, global.Output, map[string]any{
 					"error": "vm subcommand is required",
 					"usage": "vm create|up|halt|destroy|status|provision|ssh",
 				})
@@ -445,20 +445,19 @@ func resolveProvider(raw string, fallback domain.ProviderName) domain.ProviderNa
 func respond(out io.Writer, format string, payload any, err error) error {
 	if err != nil {
 		if format == "json" {
-			return write(out, format, map[string]any{"ok": false, "error": err.Error()})
+			return writePayload(out, format, map[string]any{"ok": false, "error": err.Error()})
 		}
 		return err
 	}
 	if format == "json" {
-		return write(out, format, map[string]any{"ok": true, "result": payload})
+		return writePayload(out, format, map[string]any{"ok": true, "result": payload})
 	}
-	_, writeErr := fmt.Fprintln(out, renderText(payload))
-	return writeErr
+	return writePayload(out, format, payload)
 }
 
-func write(out io.Writer, format string, payload any) error {
+func writePayload(out io.Writer, format string, payload any) error {
 	if format != "json" {
-		_, err := fmt.Fprintln(out, renderText(payload))
+		_, err := fmt.Fprintln(out, renderText(out, payload))
 		return err
 	}
 	enc := json.NewEncoder(out)
@@ -468,7 +467,7 @@ func write(out io.Writer, format string, payload any) error {
 
 func writeUsage(out io.Writer, format, message, usage string) error {
 	if format == "json" {
-		return write(out, format, map[string]any{
+		return writePayload(out, format, map[string]any{
 			"error": message,
 			"usage": usage,
 		})
@@ -477,15 +476,16 @@ func writeUsage(out io.Writer, format, message, usage string) error {
 	return err
 }
 
-func renderText(payload any) string {
+func renderText(out io.Writer, payload any) string {
+	color := supportsColor(out)
 	switch v := payload.(type) {
 	case *domain.ProjectState:
 		if v == nil {
 			return ""
 		}
-		return fmt.Sprintf("provider=%s stack=%s vm=%s", v.Provider, v.Stack, v.VMInstance)
+		return formatProjectState(v, color)
 	case providers.Status:
-		return fmt.Sprintf("provider=%s instance=%s status=%s", v.Provider, v.InstanceName, v.State)
+		return formatProviderStatus(v, color)
 	case runner.Result:
 		return strings.TrimRight(v.Stdout, "\n")
 	case *services.ConfigRender:
@@ -552,6 +552,71 @@ func renderText(payload any) string {
 		return fmt.Sprintf("%v", payload)
 	}
 }
+
+func formatProjectState(state *domain.ProjectState, color bool) string {
+	return formatKeyValues(color,
+		"provider", string(state.Provider),
+		"stack", state.Stack,
+		"vm", state.VMInstance,
+	)
+}
+
+func formatProviderStatus(status providers.Status, color bool) string {
+	return formatKeyValues(color,
+		"provider", string(status.Provider),
+		"instance", status.InstanceName,
+		"status", status.State,
+	)
+}
+
+func formatKeyValues(color bool, pairs ...string) string {
+	if len(pairs)%2 != 0 {
+		return strings.Join(pairs, " ")
+	}
+	parts := make([]string, 0, len(pairs)+len(pairs)/2-1)
+	for i := 0; i < len(pairs); i += 2 {
+		if i > 0 {
+			if color {
+				parts = append(parts, colorize("·", ansiDim))
+			}
+		}
+		key := pairs[i]
+		value := pairs[i+1]
+		if color {
+			parts = append(parts, colorize(key, ansiDim), colorize(value, ansiSoft))
+			continue
+		}
+		parts = append(parts, key+"="+value)
+	}
+	return strings.Join(parts, " ")
+}
+
+func supportsColor(out io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if term := os.Getenv("TERM"); term == "" || term == "dumb" {
+		return false
+	}
+	file, ok := out.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func colorize(value, code string) string {
+	return "\x1b[" + code + "m" + value + "\x1b[0m"
+}
+
+const (
+	ansiDim  = "90"
+	ansiSoft = "37"
+)
 
 func mustGetwd() string {
 	wd, err := os.Getwd()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mnutt/spktool/internal/domain"
@@ -766,6 +767,74 @@ func TestRunPublishDispatchesToApp(t *testing.T) {
 	}
 	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestFormatProjectStateWithoutColor(t *testing.T) {
+	t.Parallel()
+
+	got := formatProjectState(&domain.ProjectState{
+		Provider:   domain.ProviderVagrant,
+		Stack:      "node",
+		VMInstance: "video-encoder",
+	}, false)
+
+	if got != "provider=vagrant stack=node vm=video-encoder" {
+		t.Fatalf("unexpected uncolored output: %q", got)
+	}
+}
+
+func TestFormatProjectStateWithColor(t *testing.T) {
+	t.Parallel()
+
+	got := formatProjectState(&domain.ProjectState{
+		Provider:   domain.ProviderVagrant,
+		Stack:      "node",
+		VMInstance: "video-encoder",
+	}, true)
+
+	if !strings.Contains(got, "\x1b[90mprovider\x1b[0m") {
+		t.Fatalf("expected dim provider label, got %q", got)
+	}
+	if !strings.Contains(got, "\x1b[37mvagrant\x1b[0m") {
+		t.Fatalf("expected muted provider value, got %q", got)
+	}
+	if !strings.Contains(got, "\x1b[90m·\x1b[0m") {
+		t.Fatalf("expected dim separators, got %q", got)
+	}
+}
+
+func TestFormatProviderStatusWithoutColor(t *testing.T) {
+	t.Parallel()
+
+	got := formatProviderStatus(providers.Status{
+		Provider:     domain.ProviderLima,
+		InstanceName: "sandstorm-video-encoder-5841bcc4",
+		State:        "stopped",
+	}, false)
+
+	if got != "provider=lima instance=sandstorm-video-encoder-5841bcc4 status=stopped" {
+		t.Fatalf("unexpected uncolored output: %q", got)
+	}
+}
+
+func TestFormatProviderStatusWithColor(t *testing.T) {
+	t.Parallel()
+
+	got := formatProviderStatus(providers.Status{
+		Provider:     domain.ProviderLima,
+		InstanceName: "sandstorm-video-encoder-5841bcc4",
+		State:        "stopped",
+	}, true)
+
+	if !strings.Contains(got, "\x1b[90minstance\x1b[0m") {
+		t.Fatalf("expected dim instance label, got %q", got)
+	}
+	if !strings.Contains(got, "\x1b[37msandstorm-video-encoder-5841bcc4\x1b[0m") {
+		t.Fatalf("expected muted instance value, got %q", got)
+	}
+	if !strings.Contains(got, "\x1b[90mstatus\x1b[0m") {
+		t.Fatalf("expected dim status label, got %q", got)
 	}
 }
 
