@@ -101,7 +101,19 @@ func (r *ExecRunner) Run(ctx context.Context, spec Spec) (Result, error) {
 			return result, nil
 		}
 		lastErr = err
-		log.Warn("command attempt failed", "name", spec.Name, "attempt", attempt, "command", redact(result.Command, spec.Redactions), "error", err)
+		attrs := []any{
+			"name", spec.Name,
+			"attempt", attempt,
+			"command", redact(result.Command, spec.Redactions),
+			"error", err,
+		}
+		if stderr := strings.TrimSpace(result.Stderr); stderr != "" {
+			attrs = append(attrs, "stderr", stderr)
+		}
+		if stdout := strings.TrimSpace(result.Stdout); stdout != "" {
+			attrs = append(attrs, "stdout", stdout)
+		}
+		log.Warn("command attempt failed", attrs...)
 	}
 
 	return lastResult, &domain.Error{

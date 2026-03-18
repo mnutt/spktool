@@ -113,7 +113,7 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 			Name: "build-package-in-guest",
 			Do: func(context.Context) error {
 				command := []string{
-					"cd", "/opt/app/.sandstorm/",
+					"cd", "/opt/app",
 					"&&", "spk", "pack",
 					"--keyring=/host-dot-sandstorm/sandstorm-keyring",
 					"--pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef",
