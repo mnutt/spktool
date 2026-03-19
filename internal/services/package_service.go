@@ -148,55 +148,11 @@ func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, pr
 	}
 
 	project := s.deps.projectContext(workDir, projectState, resolved)
-	stagedName := filepath.Base(spkPath)
-	stagedHostPath := filepath.Join(workDir, ".sandstorm", stagedName)
-	stagedGuestPath := filepath.ToSlash(filepath.Join("/opt/app/.sandstorm", stagedName))
-	stagedOnHost, err := samePath(spkPath, stagedHostPath)
-	if err != nil {
+	if err := s.withStagedPackage(ctx, "verify", "services.Verify", workDir, spkPath, func(stagedGuestPath string) error {
+		_, err := plugin.Exec(ctx, project, []string{"spk", "verify", "--details", stagedGuestPath})
+		return err
+	}); err != nil {
 		return nil, err
-	}
-
-	err = workflow.Run(ctx, "verify", []workflow.Step{
-		{
-			Name: "stage-package-on-host",
-			Do: func(context.Context) error {
-				if stagedOnHost {
-					return nil
-				}
-				return copyFile(spkPath, stagedHostPath)
-			},
-			Rollback: func(context.Context) error {
-				if stagedOnHost {
-					return nil
-				}
-				if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-				return nil
-			},
-		},
-		{
-			Name: "verify-package-in-guest",
-			Do: func(context.Context) error {
-				_, err := plugin.Exec(ctx, project, []string{"spk", "verify", "--details", stagedGuestPath})
-				return err
-			},
-			Rollback: func(context.Context) error {
-				if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-				return nil
-			},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	if stagedOnHost {
-		return projectState, nil
-	}
-	if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
-		return nil, domain.Wrap(domain.ErrExternal, "services.Verify", "remove staged package", err)
 	}
 	return projectState, nil
 }
@@ -211,15 +167,39 @@ func (s *PackageService) Publish(ctx context.Context, workDir, spkPath string, p
 	}
 
 	project := s.deps.projectContext(workDir, projectState, resolved)
+	if err := s.withStagedPackage(ctx, "publish", "services.Publish", workDir, spkPath, func(stagedGuestPath string) error {
+		_, err := plugin.Exec(ctx, project, []string{
+			"spk", "publish",
+			"--keyring=/host-dot-sandstorm/sandstorm-keyring",
+			stagedGuestPath,
+		})
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return projectState, nil
+}
+
+func (s *PackageService) withStagedPackage(ctx context.Context, workflowName, op, workDir, spkPath string, fn func(string) error) error {
 	stagedName := filepath.Base(spkPath)
 	stagedHostPath := filepath.Join(workDir, ".sandstorm", stagedName)
 	stagedGuestPath := filepath.ToSlash(filepath.Join("/opt/app/.sandstorm", stagedName))
 	stagedOnHost, err := samePath(spkPath, stagedHostPath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	err = workflow.Run(ctx, "publish", []workflow.Step{
+	cleanup := func() error {
+		if stagedOnHost {
+			return nil
+		}
+		if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
+			return domain.Wrap(domain.ErrExternal, op, "remove staged package", err)
+		}
+		return nil
+	}
+
+	err = workflow.Run(ctx, workflowName, []workflow.Step{
 		{
 			Name: "stage-package-on-host",
 			Do: func(context.Context) error {
@@ -239,33 +219,19 @@ func (s *PackageService) Publish(ctx context.Context, workDir, spkPath string, p
 			},
 		},
 		{
-			Name: "publish-package-in-guest",
+			Name: workflowName + "-package-in-guest",
 			Do: func(context.Context) error {
-				_, err := plugin.Exec(ctx, project, []string{
-					"spk", "publish",
-					"--keyring=/host-dot-sandstorm/sandstorm-keyring",
-					stagedGuestPath,
-				})
-				return err
+				return fn(stagedGuestPath)
 			},
 			Rollback: func(context.Context) error {
-				if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
-					return err
-				}
-				return nil
+				return cleanup()
 			},
 		},
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if stagedOnHost {
-		return projectState, nil
-	}
-	if err := os.Remove(stagedHostPath); err != nil && !os.IsNotExist(err) {
-		return nil, domain.Wrap(domain.ErrExternal, "services.Publish", "remove staged package", err)
-	}
-	return projectState, nil
+	return cleanup()
 }
 
 func (s *PackageService) initArgs(stack string) string {
