@@ -1,6 +1,7 @@
 ---
 name: sandstorm-app-author
 description: Guidance for app authors packaging, integrating, debugging, and publishing Sandstorm apps. Use when creating or updating a Sandstorm app package, editing sandstorm-pkgdef.capnp, wiring Sandstorm auth or permissions, using powerbox or HTTP APIs, debugging dev-mode grains, or preparing an app for the Sandstorm app market.
+allowed-tools: Bash(spktool:list-utils) Bash(spktool:describe-util:*) Bash(spktool:add:*) Bash(spktool:install-skills) Bash(spktool:config:render) Bash(spktool:vm:status)
 ---
 
 # Sandstorm App Author
