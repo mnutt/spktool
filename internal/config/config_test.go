@@ -27,7 +27,6 @@ localhost_only = true
 box = "debian/bookworm64"
 
 [providers.lima]
-vm_type = "qemu"
 arch = "x86_64"
 image = "https://example.test/debian-amd64.qcow2"
 image_arch = "x86_64"
@@ -106,11 +105,6 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 			wantMessage: "providers.vagrant.box is required",
 		},
 		{
-			name:        "invalid lima vm type",
-			project:     replaceInValidProjectConfig(`vm_type = "qemu"`, `vm_type = "hyperkit"`),
-			wantMessage: "providers.lima.vm_type must be qemu",
-		},
-		{
 			name:        "invalid lima arch",
 			project:     replaceInValidProjectConfig(`arch = "x86_64"`, `arch = "arm64"`),
 			wantMessage: "providers.lima.arch must be one of: x86_64, aarch64",
@@ -175,7 +169,6 @@ localhost_only = true
 box = "debian/bookworm64"
 
 [providers.lima]
-vm_type = "qemu"
 arch = "x86_64"
 image = "https://example.test/debian-amd64.qcow2"
 image_arch = "x86_64"

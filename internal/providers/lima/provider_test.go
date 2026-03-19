@@ -80,7 +80,6 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
 			Lima: config.LimaResolved{
-				VMType:    "qemu",
 				Arch:      "x86_64",
 				Image:     "https://example.test/debian-amd64.qcow2",
 				ImageArch: "x86_64",
@@ -172,7 +171,6 @@ func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
 			Lima: config.LimaResolved{
-				VMType:    "qemu",
 				Arch:      "aarch64",
 				Image:     "https://example.test/debian-arm64.qcow2",
 				ImageArch: "aarch64",

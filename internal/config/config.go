@@ -56,7 +56,6 @@ type VagrantFileConfig struct {
 }
 
 type LimaFileConfig struct {
-	VMType    string `toml:"vm_type"`
 	Arch      string `toml:"arch"`
 	Image     string `toml:"image"`
 	ImageArch string `toml:"image_arch"`
@@ -86,7 +85,6 @@ type VagrantResolved struct {
 }
 
 type LimaResolved struct {
-	VMType    string
 	Arch      string
 	Image     string
 	ImageArch string
@@ -96,9 +94,6 @@ var (
 	supportedProviders = map[domain.ProviderName]struct{}{
 		domain.ProviderLima:    {},
 		domain.ProviderVagrant: {},
-	}
-	supportedLimaVMTypes = map[string]struct{}{
-		"qemu": {},
 	}
 	supportedLimaArch = map[string]struct{}{
 		"x86_64":  {},
@@ -194,11 +189,10 @@ localhost_only = true
 box = "debian/bookworm64"
 
 [providers.lima]
-vm_type = %q
 arch = %q
 image = %q
 image_arch = %q
-`, stack, lima.VMType, lima.Arch, lima.Image, lima.ImageArch))
+`, stack, lima.Arch, lima.Image, lima.ImageArch))
 }
 
 func InitialLocal(provider domain.ProviderName) []byte {
@@ -252,9 +246,6 @@ func mergeNetwork(dst *NetworkResolved, src NetworkFileConfig) {
 func mergeProviders(vagrant *VagrantResolved, lima *LimaResolved, src ProvidersFileConfig) {
 	if src.Vagrant.Box != "" {
 		vagrant.Box = src.Vagrant.Box
-	}
-	if src.Lima.VMType != "" {
-		lima.VMType = src.Lima.VMType
 	}
 	if src.Lima.Arch != "" {
 		lima.Arch = src.Lima.Arch
@@ -318,7 +309,6 @@ func mustLimaDefaults() LimaResolved {
 		}
 
 		limaDefaults = LimaResolved{
-			VMType:    file.VMType,
 			Arch:      file.Arch,
 			Image:     file.Image,
 			ImageArch: file.ImageArch,
@@ -354,9 +344,6 @@ func validateResolved(resolved *Resolved) error {
 	}
 	if strings.TrimSpace(resolved.Vagrant.Box) == "" {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.vagrant.box is required"}
-	}
-	if _, ok := supportedLimaVMTypes[resolved.Lima.VMType]; !ok {
-		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.vm_type must be qemu"}
 	}
 	if _, ok := supportedLimaArch[resolved.Lima.Arch]; !ok {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.arch must be one of: x86_64, aarch64"}
