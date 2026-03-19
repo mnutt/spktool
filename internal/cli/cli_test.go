@@ -414,6 +414,42 @@ func TestRunDescribeUtilRequiresName(t *testing.T) {
 	}
 }
 
+func TestRunListUtilsHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"node"}}), Config{
+		Program: "spktool",
+		Args:    []string{"list-utils", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "list-utils lists installable Sandstorm utilities.\n\nUsage:\n  list-utils\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunDescribeUtilHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"node"}}), Config{
+		Program: "spktool",
+		Args:    []string{"describe-util", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "describe-util shows details for an installable Sandstorm utility.\n\nUsage:\n  describe-util <name>\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
 func TestRunAddRequiresUtilName(t *testing.T) {
 	t.Parallel()
 
@@ -428,6 +464,24 @@ func TestRunAddRequiresUtilName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := stdout.String(); got != "error: utility name is required\nusage: add <util>\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunAddHelp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"node"}}), Config{
+		Program: "spktool",
+		Args:    []string{"add", "--help"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "add installs a Sandstorm utility into the current project.\n\nUsage:\n  add <util>\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }

@@ -168,15 +168,24 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 		state, err := apps.Grains.EnterGrain(ctx, global.WorkDir, providerOverride, global.NonInter)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "list-utils":
+		if len(args) > 1 && args[1] == "--help" {
+			return printListUtilsHelp(cfg.Stdout)
+		}
 		catalog, err := apps.Utility.ListUtilities(ctx)
 		return respond(cfg.Stdout, global.Output, catalog, err)
 	case "describe-util":
+		if len(args) > 1 && args[1] == "--help" {
+			return printDescribeUtilHelp(cfg.Stdout)
+		}
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "describe-util <name>")
 		}
 		details, err := apps.Utility.DescribeUtility(ctx, args[1])
 		return respond(cfg.Stdout, global.Output, details, err)
 	case "add":
+		if len(args) > 1 && args[1] == "--help" {
+			return printAddHelp(cfg.Stdout)
+		}
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "add <util>")
 		}
@@ -431,6 +440,33 @@ Flags:
   --codex    install Codex skill files into .codex/skills
   --claude   install Claude Code skill files into .claude/skills
   --force    overwrite existing installed skill files
+`)
+	return err
+}
+
+func printListUtilsHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `list-utils lists installable Sandstorm utilities.
+
+Usage:
+  list-utils
+`)
+	return err
+}
+
+func printDescribeUtilHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `describe-util shows details for an installable Sandstorm utility.
+
+Usage:
+  describe-util <name>
+`)
+	return err
+}
+
+func printAddHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `add installs a Sandstorm utility into the current project.
+
+Usage:
+  add <util>
 `)
 	return err
 }
