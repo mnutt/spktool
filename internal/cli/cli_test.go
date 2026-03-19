@@ -30,6 +30,7 @@ type fakeApp struct {
 	enterGrain func(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
 	vmCreate   func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmUp       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	vmHalt     func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmSSH      func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
 	status     func(context.Context, string, domain.ProviderName) (providers.Status, error)
 	stacks     []string
@@ -89,8 +90,8 @@ func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.
 func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.vmUp(ctx, workDir, provider)
 }
-func (a *fakeApp) VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
-	panic("unexpected call")
+func (a *fakeApp) VMHalt(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.vmHalt(ctx, workDir, provider)
 }
 func (a *fakeApp) VMDestroy(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
@@ -558,6 +559,80 @@ func TestRunVMCreateDispatchesToCreate(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("expected vm create dispatch")
+	}
+	if got := stdout.String(); got != "provider=vagrant stack=node vm=demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMStartDispatchesToUp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var called bool
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderLima {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			called = true
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "vm", "start"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("expected vm start to dispatch to up")
+	}
+	if got := stdout.String(); got != "provider=lima stack=node vm=demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMStopDispatchesToHalt(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var called bool
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmHalt: func(_ context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderVagrant {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			called = true
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "--provider", "vagrant", "vm", "stop"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("expected vm stop to dispatch to halt")
 	}
 	if got := stdout.String(); got != "provider=vagrant stack=node vm=demo\n" {
 		t.Fatalf("unexpected output: %q", got)

@@ -324,7 +324,7 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		return printVMHelp(out)
 	}
 	switch args[0] {
-	case "create", "up", "halt", "destroy", "status", "provision", "ssh":
+	case "create", "up", "start", "halt", "stop", "destroy", "status", "provision", "ssh":
 		if len(args) > 1 && args[1] == "--help" {
 			return printVMHelp(out)
 		}
@@ -333,10 +333,10 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 	case "create":
 		state, err := app.VMCreate(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
-	case "up":
+	case "up", "start":
 		state, err := app.VMUp(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
-	case "halt":
+	case "halt", "stop":
 		state, err := app.VMHalt(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
 	case "destroy":
