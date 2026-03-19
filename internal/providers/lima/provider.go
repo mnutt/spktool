@@ -6,10 +6,13 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -22,6 +25,16 @@ import (
 type Provider struct {
 	runner    runner.Runner
 	templates *templates.Repository
+}
+
+const forcedVMType = "qemu"
+
+var lookPath = exec.LookPath
+var userHomeDir = os.UserHomeDir
+var readDir = os.ReadDir
+var readFile = os.ReadFile
+var combinedOutput = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
 }
 
 func New(r runner.Runner, repo *templates.Repository) *Provider {
@@ -42,10 +55,7 @@ func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers
 	if project.Config.Network.Sandstorm.LocalhostOnly {
 		hostIP = "\n    hostIP: 127.0.0.1"
 	}
-	mountType := "reverse-sshfs"
-	if project.Config.Lima.VMType == "vz" {
-		mountType = "virtiofs"
-	}
+	mountType := defaultMountType(project.Config.Lima.Arch)
 	body := []byte(fmt.Sprintf(`arch: %s
 vmType: %s
 mountType: %s
@@ -69,7 +79,7 @@ portForwards:
     proto: "any"
     guestPortRange: [1, 65535]
     ignore: true
-`, project.Config.Lima.Arch, project.Config.Lima.VMType, mountType, project.Config.Lima.Image, project.Config.Lima.ImageArch, project.WorkDir, filepath.Join(homeDir, ".sandstorm"), project.Config.Network.Sandstorm.GuestPort, project.Config.Network.Sandstorm.ExternalPort, hostIP))
+`, project.Config.Lima.Arch, forcedVMType, mountType, project.Config.Lima.Image, project.Config.Lima.ImageArch, project.WorkDir, filepath.Join(homeDir, ".sandstorm"), project.Config.Network.Sandstorm.GuestPort, project.Config.Network.Sandstorm.ExternalPort, hostIP))
 	return []providers.RenderedFile{{
 		Path: filepath.Join(".sandstorm", ".generated", "lima.yaml"),
 		Body: body,
@@ -86,12 +96,20 @@ func (p *Provider) DetectInstanceName(workDir string) string {
 
 func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) error {
 	instance := p.DetectInstanceName(project.WorkDir)
+	status, err := p.Status(ctx, project)
+	if err != nil {
+		return err
+	}
 	stopTail := func() {}
 	if project.Verbose {
 		stopTail = startSerialTail(instance)
 	}
 	defer stopTail()
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}, Stream: true})
+	args := []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}
+	if limaInstanceExists(status.State) {
+		args = []string{"start", "--tty=false", instance}
+	}
+	_, err = p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: args, Stream: true})
 	return err
 }
 
@@ -255,6 +273,93 @@ func shellQuote(s string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func defaultMountType(arch string) string {
+	if runtime.GOOS == "darwin" {
+		return "9p"
+	}
+	if _, err := findVirtiofsd(arch); err == nil {
+		return "virtiofs"
+	}
+	return "9p"
+}
+
+func findVirtiofsd(arch string) (string, error) {
+	qemuExe, err := qemuExecutable(arch)
+	if err != nil {
+		return "", err
+	}
+	homeDir, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	type vhostUserBackend struct {
+		BackendType string `json:"type"`
+		Binary      string `json:"binary"`
+	}
+
+	const relativePath = "share/qemu/vhost-user"
+	binDir := filepath.Dir(qemuExe)
+	usrDir := filepath.Dir(binDir)
+	userLocalDir := filepath.Join(homeDir, ".local")
+
+	candidates := []string{
+		filepath.Join(userLocalDir, relativePath),
+		filepath.Join(usrDir, relativePath),
+	}
+	if usrDir != "/usr" {
+		candidates = append(candidates, filepath.Join("/usr", relativePath))
+	}
+
+	for _, vhostCfgsDir := range candidates {
+		cfgEntries, err := readDir(vhostCfgsDir)
+		if err != nil {
+			continue
+		}
+		for _, cfgEntry := range cfgEntries {
+			if cfgEntry.IsDir() || !strings.HasSuffix(cfgEntry.Name(), ".json") {
+				continue
+			}
+			var vhostCfg vhostUserBackend
+			contents, err := readFile(filepath.Join(vhostCfgsDir, cfgEntry.Name()))
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(contents, &vhostCfg); err != nil {
+				continue
+			}
+			if vhostCfg.BackendType != "fs" || vhostCfg.Binary == "" {
+				continue
+			}
+			if _, err := combinedOutput(vhostCfg.Binary, "--version"); err != nil {
+				continue
+			}
+			return vhostCfg.Binary, nil
+		}
+	}
+
+	return "", errors.New("failed to locate virtiofsd")
+}
+
+func qemuExecutable(arch string) (string, error) {
+	name := "qemu-system-" + arch
+	switch arch {
+	case "x86_64", "aarch64":
+		return lookPath(name)
+	default:
+		return "", fmt.Errorf("unsupported qemu arch %q", arch)
+	}
+}
+
+func limaInstanceExists(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "unknown", "not_created", "not created":
+		return false
+	default:
+		return true
+	}
 }
 
 var _ providers.Plugin = (*Provider)(nil)

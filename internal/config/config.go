@@ -99,7 +99,6 @@ var (
 	}
 	supportedLimaVMTypes = map[string]struct{}{
 		"qemu": {},
-		"vz":   {},
 	}
 	supportedLimaArch = map[string]struct{}{
 		"x86_64":  {},
@@ -357,7 +356,7 @@ func validateResolved(resolved *Resolved) error {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.vagrant.box is required"}
 	}
 	if _, ok := supportedLimaVMTypes[resolved.Lima.VMType]; !ok {
-		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.vm_type must be one of: qemu, vz"}
+		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.vm_type must be qemu"}
 	}
 	if _, ok := supportedLimaArch[resolved.Lima.Arch]; !ok {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.arch must be one of: x86_64, aarch64"}

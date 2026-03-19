@@ -21,24 +21,6 @@ apt-get upgrade -y
 # Install curl needed below, and gnupg for package signing
 apt-get install -y curl gnupg netcat-openbsd
 
-# The following line copies stderr through stderr to cat without accidentally leaving it in the
-# output file. Be careful when changing. See: https://github.com/sandstorm-io/vagrant-spk/pull/159
-curl $CURL_OPTS https://install.sandstorm.io/ 2>&1 > /host-dot-sandstorm/caches/install.sh | cat
-
-SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.io/dev?from=0&type=install")
-SANDSTORM_PACKAGE="sandstorm-$SANDSTORM_CURRENT_VERSION.tar.xz"
-if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
-    echo -n "Downloading Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    curl $CURL_OPTS --output "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "https://dl.sandstorm.io/$SANDSTORM_PACKAGE" 2>&1 | cat
-    mv "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE"
-    echo "...done."
-fi
-if [ ! -e /opt/sandstorm/latest/sandstorm ] ; then
-    echo -n "Installing Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
-    echo "...done."
-fi
-modprobe ip_tables
 # Make the primary guest user part of the sandstorm group so that commands like
 # `spk dev` work across providers.
 APP_USER="${SUDO_USER:-}"
@@ -49,7 +31,43 @@ if [[ -z "${APP_USER}" || "${APP_USER}" == "root" ]]; then
         APP_USER="$(find /home -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | head -n1)"
     fi
 fi
-if [[ -n "${APP_USER}" ]] && id -u "${APP_USER}" >/dev/null 2>&1; then
+
+host_cache_write() {
+    local target="$1"
+    local app_user="$2"
+    local tmp_target="${target}.spktool-tmp"
+    shift 2
+
+    if [[ -z "${app_user}" ]]; then
+        "$@" > "${tmp_target}"
+        mv "${tmp_target}" "${target}"
+        return
+    fi
+
+    su -s /bin/bash - "${app_user}" -c "cat > \"${tmp_target}\" && mv \"${tmp_target}\" \"${target}\"" < <("$@")
+}
+
+# The following line copies stderr through stderr to cat without accidentally leaving it in the
+# output file. Be careful when changing. See: https://github.com/sandstorm-io/vagrant-spk/pull/159
+host_cache_write /host-dot-sandstorm/caches/install.sh "${APP_USER}" \
+    curl $CURL_OPTS https://install.sandstorm.io/ 2>&1 | cat
+
+SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.io/dev?from=0&type=install")
+SANDSTORM_PACKAGE="sandstorm-$SANDSTORM_CURRENT_VERSION.tar.xz"
+if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
+    echo -n "Downloading Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
+    host_cache_write "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "${APP_USER}" \
+        curl $CURL_OPTS "https://dl.sandstorm.io/$SANDSTORM_PACKAGE" 2>&1 | cat
+    mv "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE"
+    echo "...done."
+fi
+if [ ! -e /opt/sandstorm/latest/sandstorm ] ; then
+    echo -n "Installing Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
+    bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
+    echo "...done."
+fi
+modprobe ip_tables
+if [[ -n "${APP_USER}" ]] && id -u "${APP_USER}" >/dev/null 2>&1 && getent group sandstorm >/dev/null 2>&1; then
     usermod -a -G 'sandstorm' "${APP_USER}"
 fi
 # Bind to all addresses, so the vagrant port-forward works.

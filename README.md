@@ -117,9 +117,10 @@ Those aliases change the default provider based on `argv[0]`, so:
 
 ## Lima Notes
 
-- Lima 2.0.x with the Debian 12 image needs an explicit mount type for QEMU.
-  `spktool` now renders `mountType: reverse-sshfs` for `vm_type = "qemu"` and
-  `mountType: virtiofs` for `vm_type = "vz"`.
+- `spktool` renders Lima instances with `vmType: qemu`.
+- On macOS hosts, `spktool` renders `mountType: 9p` for Lima.
+- On non-macOS hosts, `spktool` renders `mountType: virtiofs` when `virtiofsd`
+  is available and falls back to `9p` otherwise.
 - `--verbose` enables Lima serial boot tailing to help diagnose startup issues.
 - The generated `runtime.env` is consumed by `global-setup.sh` during
   provisioning and drives the Sandstorm bind address, external port, base URL,
