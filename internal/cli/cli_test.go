@@ -1250,7 +1250,7 @@ func TestRunInstallSkillsDispatchesToApp(t *testing.T) {
 			gotReq = req
 			return &services.InstallSkillsResult{
 				Targets:          []string{"codex", "claude"},
-				Files:            []string{".codex/skills/sandstorm-app-author/SKILL.md"},
+				Directories:      []string{".codex/skills/sandstorm-app-author/"},
 				GitignoreUpdated: true,
 			}, nil
 		},

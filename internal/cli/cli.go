@@ -573,11 +573,11 @@ func renderText(out io.Writer, payload any) string {
 		if v == nil {
 			return ""
 		}
-		lines := make([]string, 0, len(v.Targets)+len(v.Files)+1)
+		lines := make([]string, 0, len(v.Targets)+len(v.Directories)+1)
 		if len(v.Targets) > 0 {
 			lines = append(lines, "targets: "+strings.Join(v.Targets, ", "))
 		}
-		lines = append(lines, v.Files...)
+		lines = append(lines, v.Directories...)
 		if v.GitignoreUpdated {
 			lines = append(lines, ".gitignore updated")
 		}
