@@ -14,6 +14,7 @@ Prefer `spktool` over legacy `vagrant-spk` or `lima-spk`.
 - Most projects should use `spktool` from the project root.
 - `.sandstorm/box.toml` is the checked-in source of truth for stack, networking, and provider defaults.
 - `.sandstorm/box.local.toml` is for machine-local overrides such as provider choice.
+- Unless the user explicitly asks otherwise, do not install system-wide packages on the host and do not run the app on the host outside the VM.
 - Most apps use `sandstorm-http-bridge`.
 - App data should live under `/var`.
 - Sandstorm handles authentication. The app usually should not implement its own login flow.

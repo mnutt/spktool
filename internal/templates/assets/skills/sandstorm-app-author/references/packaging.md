@@ -16,7 +16,8 @@ Interpretation guidance:
 - Key management uses `spktool keygen`, `spktool listkeys`, and `spktool getkey`.
 - Grain debugging can use `spktool enter-grain`.
 - Agent skill installation uses `spktool install-skills --codex` and/or `spktool install-skills --claude`.
-- Utility discovery and installation use `spktool list-utils`, `spktool describe-util <name>`, and `spktool add <name>`. Example utilities include `get-public-id` and `stay-awake`.
+- Utility discovery and installation use `spktool list-utils`, `spktool describe-util <name>`, and `spktool add <name>`. `list-utils` and `describe-util` require network privileges because they query the utility catalog. Example utilities include `get-public-id` and `stay-awake`.
+- Unless the user explicitly asks otherwise, do not install host system packages and do not run the app directly on the host outside the VM.
 
 Key project files in `spktool` projects:
 
@@ -61,7 +62,7 @@ Ask which layer is failing first, then change the narrowest control surface that
 
 Some `spktool` operations depend on environment health rather than app logic:
 
-- network access for downloads, publishing, or utility catalog lookups
+- network access for downloads or publishing
 - VM creation and provisioning time
 - provider health for Lima or Vagrant
 - host DNS, ports, and forwarding behavior
