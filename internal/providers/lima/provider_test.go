@@ -2,7 +2,9 @@ package lima
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -24,6 +26,21 @@ func (r *captureRunner) Run(_ context.Context, spec runner.Spec) (runner.Result,
 		return runner.Result{Stdout: "ok"}, nil
 	}
 	return r.result, nil
+}
+
+type sequenceRunner struct {
+	specs   []runner.Spec
+	results []runner.Result
+}
+
+func (r *sequenceRunner) Run(_ context.Context, spec runner.Spec) (runner.Result, error) {
+	r.specs = append(r.specs, spec)
+	if len(r.results) == 0 {
+		return runner.Result{Stdout: "ok"}, nil
+	}
+	result := r.results[0]
+	r.results = r.results[1:]
+	return result, nil
 }
 
 func TestDetectInstanceNameSanitizesWorkspacePath(t *testing.T) {
@@ -49,7 +66,7 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 				Image:     "https://example.test/debian-amd64.qcow2",
 				ImageArch: "x86_64",
 			},
-			Network: config.NetworkResolved{Sandstorm: config.SandstormResolved{
+			Network: config.NetworkResolved{Sandstorm: config.SandstormNetworkResolved{
 				GuestPort:     6090,
 				ExternalPort:  6020,
 				LocalhostOnly: true,
@@ -68,8 +85,14 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 	if !strings.Contains(string(files[0].Body), `location: "/workspace/demo"`) {
 		t.Fatalf("expected workdir mount in lima.yaml: %s", string(files[0].Body))
 	}
-	if !strings.Contains(string(files[0].Body), "mountType: reverse-sshfs") {
-		t.Fatalf("expected qemu mount type override in lima.yaml: %s", string(files[0].Body))
+	wantMountType := "9p"
+	if runtime.GOOS != "darwin" {
+		prevLookPath := lookPath
+		lookPath = func(string) (string, error) { return "", errors.New("not found") }
+		t.Cleanup(func() { lookPath = prevLookPath })
+	}
+	if !strings.Contains(string(files[0].Body), "mountType: "+wantMountType) {
+		t.Fatalf("expected qemu mount type override %q in lima.yaml: %s", wantMountType, string(files[0].Body))
 	}
 	if !strings.Contains(string(files[0].Body), "images:") {
 		t.Fatalf("expected base image in lima.yaml: %s", string(files[0].Body))
@@ -95,16 +118,19 @@ func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
 	t.Parallel()
 
 	provider := New(&captureRunner{}, templates.New())
+	prevLookPath := lookPath
+	lookPath = func(string) (string, error) { return "/usr/bin/virtiofsd", nil }
+	t.Cleanup(func() { lookPath = prevLookPath })
 	files, err := provider.BootstrapFiles(providers.ProjectContext{
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
 			Lima: config.LimaResolved{
-				VMType:    "vz",
+				VMType:    "qemu",
 				Arch:      "aarch64",
 				Image:     "https://example.test/debian-arm64.qcow2",
 				ImageArch: "aarch64",
 			},
-			Network: config.NetworkResolved{Sandstorm: config.SandstormResolved{
+			Network: config.NetworkResolved{Sandstorm: config.SandstormNetworkResolved{
 				GuestPort:    6090,
 				ExternalPort: 6090,
 			}},
@@ -117,11 +143,42 @@ func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
 	if !strings.Contains(body, `arch: aarch64`) {
 		t.Fatalf("expected configured arch in lima.yaml: %s", body)
 	}
-	if !strings.Contains(body, `mountType: virtiofs`) {
-		t.Fatalf("expected vz mount type in lima.yaml: %s", body)
+	if !strings.Contains(body, `vmType: qemu`) {
+		t.Fatalf("expected forced qemu vm type in lima.yaml: %s", body)
+	}
+	wantMountType := "virtiofs"
+	if runtime.GOOS == "darwin" {
+		wantMountType = "9p"
+	}
+	if !strings.Contains(body, `mountType: `+wantMountType) {
+		t.Fatalf("expected %s mount type in lima.yaml: %s", wantMountType, body)
 	}
 	if !strings.Contains(body, `location: "https://example.test/debian-arm64.qcow2"`) {
 		t.Fatalf("expected configured arm64 image in lima.yaml: %s", body)
+	}
+}
+
+func TestDefaultMountType(t *testing.T) {
+	t.Parallel()
+
+	prevLookPath := lookPath
+	t.Cleanup(func() { lookPath = prevLookPath })
+
+	if runtime.GOOS == "darwin" {
+		if got := defaultMountType(); got != "9p" {
+			t.Fatalf("expected darwin qemu mount type 9p, got %q", got)
+		}
+		return
+	}
+
+	lookPath = func(string) (string, error) { return "/usr/bin/virtiofsd", nil }
+	if got := defaultMountType(); got != "virtiofs" {
+		t.Fatalf("expected non-darwin mount type virtiofs when virtiofsd exists, got %q", got)
+	}
+
+	lookPath = func(string) (string, error) { return "", errors.New("not found") }
+	if got := defaultMountType(); got != "9p" {
+		t.Fatalf("expected non-darwin mount type 9p when virtiofsd is missing, got %q", got)
 	}
 }
 
@@ -250,6 +307,33 @@ func TestStatusReturnsUnknownWhenInstanceIsMissing(t *testing.T) {
 	}
 	if status.State != "unknown" {
 		t.Fatalf("expected unknown state, got %+v", status)
+	}
+}
+
+func TestUpStartsExistingInstanceByName(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/workspace/demo"
+	instanceName := New(&captureRunner{}, templates.New()).DetectInstanceName(workDir)
+	r := &sequenceRunner{
+		results: []runner.Result{
+			{Stdout: "{\"name\":\"" + instanceName + "\",\"status\":\"Stopped\"}\n"},
+			{},
+		},
+	}
+	provider := New(r, templates.New())
+
+	if err := provider.Up(context.Background(), providers.ProjectContext{WorkDir: workDir}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.specs) != 2 {
+		t.Fatalf("expected status and start calls, got %d", len(r.specs))
+	}
+	if got := strings.Join(r.specs[1].Args, " "); strings.Contains(got, "lima.yaml") || strings.Contains(got, "--name") {
+		t.Fatalf("expected existing instance start without config file, got %q", got)
+	}
+	if got := strings.Join(r.specs[1].Args, " "); !strings.Contains(got, "start --tty=false "+instanceName) {
+		t.Fatalf("unexpected start args: %q", got)
 	}
 }
 

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -23,6 +25,10 @@ type Provider struct {
 	runner    runner.Runner
 	templates *templates.Repository
 }
+
+const forcedVMType = "qemu"
+
+var lookPath = exec.LookPath
 
 func New(r runner.Runner, repo *templates.Repository) *Provider {
 	return &Provider{runner: r, templates: repo}
@@ -42,10 +48,7 @@ func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers
 	if project.Config.Network.Sandstorm.LocalhostOnly {
 		hostIP = "\n    hostIP: 127.0.0.1"
 	}
-	mountType := "reverse-sshfs"
-	if project.Config.Lima.VMType == "vz" {
-		mountType = "virtiofs"
-	}
+	mountType := defaultMountType()
 	body := []byte(fmt.Sprintf(`arch: %s
 vmType: %s
 mountType: %s
@@ -69,7 +72,7 @@ portForwards:
     proto: "any"
     guestPortRange: [1, 65535]
     ignore: true
-`, project.Config.Lima.Arch, project.Config.Lima.VMType, mountType, project.Config.Lima.Image, project.Config.Lima.ImageArch, project.WorkDir, filepath.Join(homeDir, ".sandstorm"), project.Config.Network.Sandstorm.GuestPort, project.Config.Network.Sandstorm.ExternalPort, hostIP))
+`, project.Config.Lima.Arch, forcedVMType, mountType, project.Config.Lima.Image, project.Config.Lima.ImageArch, project.WorkDir, filepath.Join(homeDir, ".sandstorm"), project.Config.Network.Sandstorm.GuestPort, project.Config.Network.Sandstorm.ExternalPort, hostIP))
 	return []providers.RenderedFile{{
 		Path: filepath.Join(".sandstorm", ".generated", "lima.yaml"),
 		Body: body,
@@ -86,12 +89,20 @@ func (p *Provider) DetectInstanceName(workDir string) string {
 
 func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) error {
 	instance := p.DetectInstanceName(project.WorkDir)
+	status, err := p.Status(ctx, project)
+	if err != nil {
+		return err
+	}
 	stopTail := func() {}
 	if project.Verbose {
 		stopTail = startSerialTail(instance)
 	}
 	defer stopTail()
-	_, err := p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}, Stream: true})
+	args := []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}
+	if limaInstanceExists(status.State) {
+		args = []string{"start", "--tty=false", instance}
+	}
+	_, err = p.runner.Run(ctx, runner.Spec{Name: "lima-start", Command: "limactl", Args: args, Stream: true})
 	return err
 }
 
@@ -255,6 +266,25 @@ func shellQuote(s string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func defaultMountType() string {
+	if runtime.GOOS == "darwin" {
+		return "9p"
+	}
+	if _, err := lookPath("virtiofsd"); err == nil {
+		return "virtiofs"
+	}
+	return "9p"
+}
+
+func limaInstanceExists(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "unknown", "not_created", "not created":
+		return false
+	default:
+		return true
+	}
 }
 
 var _ providers.Plugin = (*Provider)(nil)

@@ -1,4 +1,4 @@
 vm_type = "qemu"
 arch = "x86_64"
-image = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+image = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 image_arch = "x86_64"

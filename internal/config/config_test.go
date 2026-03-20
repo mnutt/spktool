@@ -156,7 +156,7 @@ image_arch = "x86_64"
 		{
 			name:        "invalid lima vm type",
 			project:     replaceInValidProjectConfig(`vm_type = "qemu"`, `vm_type = "hyperkit"`),
-			wantMessage: "providers.lima.vm_type must be one of: qemu, vz",
+			wantMessage: "providers.lima.vm_type must be qemu",
 		},
 		{
 			name:        "invalid lima arch",
