@@ -8,10 +8,13 @@ set -euo pipefail
 # 'cat' to buffer the output; for more information:
 # https://github.com/sandstorm-io/vagrant-spk/issues/158
 
-CURL_OPTS="--silent --show-error"
+CURL_OPTS="--silent --show-error --location"
 echo localhost > /etc/hostname
 hostname localhost
 . /opt/app/.sandstorm/.generated/runtime.env
+
+SANDSTORM_INSTALL_SCRIPT_URL="https://install.sandstorm.io/"
+SANDSTORM_PACKAGE_URL="${SANDSTORM_DOWNLOAD_URL:-}"
 
 # Grub updates don't silent install well
 apt-mark hold grub-pc || true
@@ -23,19 +26,33 @@ apt-get install -y curl gnupg netcat-openbsd
 
 # The following line copies stderr through stderr to cat without accidentally leaving it in the
 # output file. Be careful when changing. See: https://github.com/sandstorm-io/vagrant-spk/pull/159
-curl $CURL_OPTS https://install.sandstorm.io/ 2>&1 > /host-dot-sandstorm/caches/install.sh | cat
+curl $CURL_OPTS --fail "${SANDSTORM_INSTALL_SCRIPT_URL}" 2>&1 > /host-dot-sandstorm/caches/install.sh | cat
 
-SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.io/dev?from=0&type=install")
-SANDSTORM_PACKAGE="sandstorm-$SANDSTORM_CURRENT_VERSION.tar.xz"
+if [[ -n "${SANDSTORM_PACKAGE_URL}" ]]; then
+    SANDSTORM_PACKAGE="${SANDSTORM_PACKAGE_URL##*/}"
+    SANDSTORM_CURRENT_VERSION="${SANDSTORM_PACKAGE#sandstorm-}"
+    SANDSTORM_CURRENT_VERSION="${SANDSTORM_CURRENT_VERSION%.tar.xz}"
+    echo
+    echo "========================================"
+    echo "CUSTOM SANDSTORM INSTALL URL IN USE"
+    echo "${SANDSTORM_PACKAGE_URL}"
+    echo "========================================"
+    echo
+else
+    SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.io/dev?from=0&type=install")
+    SANDSTORM_PACKAGE="sandstorm-$SANDSTORM_CURRENT_VERSION.tar.xz"
+    SANDSTORM_PACKAGE_URL="https://dl.sandstorm.io/$SANDSTORM_PACKAGE"
+fi
+
 if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
     echo -n "Downloading Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    curl $CURL_OPTS --output "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "https://dl.sandstorm.io/$SANDSTORM_PACKAGE" 2>&1 | cat
+    curl $CURL_OPTS --fail --output "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "${SANDSTORM_PACKAGE_URL}" 2>&1 | cat
     mv "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE.partial" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE"
     echo "...done."
 fi
 if [ ! -e /opt/sandstorm/latest/sandstorm ] ; then
     echo -n "Installing Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
+    REPORT=no bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE"
     echo "...done."
 fi
 modprobe ip_tables

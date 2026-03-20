@@ -54,6 +54,9 @@ type fakePlugin struct {
 	grains          []providers.Grain
 	attached        *providers.Grain
 	attachChecksum  string
+	forwarded       *providers.Grain
+	forwardLocal    int
+	forwardTarget   int
 }
 
 func (p *fakePlugin) Name() domain.ProviderName { return p.name }
@@ -118,6 +121,13 @@ func (p *fakePlugin) ListGrains(context.Context, providers.ProjectContext) ([]pr
 func (p *fakePlugin) AttachGrain(_ context.Context, _ providers.ProjectContext, grain providers.Grain, _ []byte, checksum string) error {
 	p.attached = &grain
 	p.attachChecksum = checksum
+	return nil
+}
+func (p *fakePlugin) ForwardGrainPort(_ context.Context, _ providers.ProjectContext, grain providers.Grain, _ []byte, checksum string, localPort, grainPort int) error {
+	p.forwarded = &grain
+	p.attachChecksum = checksum
+	p.forwardLocal = localPort
+	p.forwardTarget = grainPort
 	return nil
 }
 func (p *fakePlugin) Provision(_ context.Context, project providers.ProjectContext) error {
@@ -1266,7 +1276,7 @@ func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.VMCreate(context.Background(), workDir, ""); err != nil {
+	if _, err := svc.VMCreate(context.Background(), workDir, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.Config == nil {
@@ -1282,7 +1292,7 @@ func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
 		t.Fatalf("expected vm create to call up and provision once each, got up=%d provision=%d", upCalls, provisionCalls)
 	}
 
-	if _, err := svc.VMUp(context.Background(), workDir, ""); err != nil {
+	if _, err := svc.VMUp(context.Background(), workDir, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.Config == nil {
@@ -1305,7 +1315,7 @@ func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
 		t.Fatalf("unexpected vm halt context: %+v", plugin.lastActionCtx.State)
 	}
 
-	if _, err := svc.VMProvision(context.Background(), workDir, ""); err != nil {
+	if _, err := svc.VMProvision(context.Background(), workDir, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.lastActionCtx.Config == nil || plugin.lastActionCtx.Config.Network.Sandstorm.ExternalPort != 6090 {
@@ -1351,12 +1361,56 @@ func TestVMCreateReturnsProvisionErrorAfterSuccessfulStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := svc.VMCreate(context.Background(), workDir, "")
+	_, err := svc.VMCreate(context.Background(), workDir, "", "")
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected provision error, got %v", err)
 	}
 	if upCalls != 1 || provisionCalls != 1 {
 		t.Fatalf("expected vm create to call up and provision once each, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMProvisionPersistsSandstormDownloadURLAndRefreshesRuntimeEnv(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "running",
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.VMProvision(context.Background(), workDir, "", "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"); err != nil {
+		t.Fatal(err)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(localData), `download_url = "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"`) {
+		t.Fatalf("expected local config to persist sandstorm download url, got:\n%s", string(localData))
+	}
+
+	runtimeEnv, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtimeEnv), "SANDSTORM_DOWNLOAD_URL=https://downloads.example.test/sandstorm-0-fast-1.tar.xz") {
+		t.Fatalf("expected runtime.env to include sandstorm download url, got:\n%s", string(runtimeEnv))
+	}
+	if plugin.lastActionCtx.Config == nil || plugin.lastActionCtx.Config.Sandstorm.DownloadURL != "https://downloads.example.test/sandstorm-0-fast-1.tar.xz" {
+		t.Fatalf("unexpected runtime config: %+v", plugin.lastActionCtx.Config)
 	}
 }
 
@@ -1390,11 +1444,106 @@ func TestVMUpDoesNotProvision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.VMUp(context.Background(), workDir, ""); err != nil {
+	if _, err := svc.VMUp(context.Background(), workDir, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if upCalls != 1 || provisionCalls != 0 {
 		t.Fatalf("expected vm up to call up only, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMUpPersistsSandstormPortOverrideAndRefreshesRuntimeEnv(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	var upCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "unknown",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.VMUp(context.Background(), workDir, "", 7000); err != nil {
+		t.Fatal(err)
+	}
+	if upCalls != 1 {
+		t.Fatalf("expected vm up to call up once, got %d", upCalls)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(localData), "guest_port = 7000") || !strings.Contains(string(localData), "external_port = 7000") {
+		t.Fatalf("expected local config to persist both ports, got:\n%s", string(localData))
+	}
+
+	runtimeEnv, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", ".generated", "runtime.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(runtimeEnv), "SANDSTORM_EXTERNAL_PORT=7000") {
+		t.Fatalf("expected runtime.env to include updated external port, got:\n%s", string(runtimeEnv))
+	}
+	if plugin.lastActionCtx.Config == nil || plugin.lastActionCtx.Config.Network.Sandstorm.GuestPort != 7000 || plugin.lastActionCtx.Config.Network.Sandstorm.ExternalPort != 7000 {
+		t.Fatalf("unexpected vm up config: %+v", plugin.lastActionCtx.Config)
+	}
+}
+
+func TestVMUpWithPortReturnsConflictWhenInstanceAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	var upCalls int
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		statusResult: providers.Status{
+			Provider:     domain.ProviderLima,
+			InstanceName: "sandstorm-app-1234",
+			State:        "running",
+		},
+		upHook: func(project providers.ProjectContext) error {
+			upCalls++
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.VMUp(context.Background(), workDir, "", 7000)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrConflict {
+		t.Fatalf("expected conflict error, got %v", err)
+	}
+	if upCalls != 0 {
+		t.Fatalf("expected vm up not to be called, got %d", upCalls)
+	}
+
+	localData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(localData), "guest_port = 7000") || strings.Contains(string(localData), "external_port = 7000") {
+		t.Fatalf("expected local config to remain unchanged, got:\n%s", string(localData))
 	}
 }
 
@@ -1428,7 +1577,7 @@ func TestVMCreateReturnsConflictWhenInstanceAlreadyExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := svc.VMCreate(context.Background(), workDir, "")
+	_, err := svc.VMCreate(context.Background(), workDir, "", "")
 	var domainErr *domain.Error
 	if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrConflict {
 		t.Fatalf("expected conflict error, got %v", err)

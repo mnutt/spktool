@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,23 +24,29 @@ const (
 )
 
 type ProjectFileConfig struct {
-	Stack     string              `toml:"stack"`
-	Provider  string              `toml:"provider"`
-	Network   NetworkFileConfig   `toml:"network"`
-	Providers ProvidersFileConfig `toml:"providers"`
+	Stack     string                    `toml:"stack"`
+	Provider  string                    `toml:"provider"`
+	Sandstorm SandstormConfigFileConfig `toml:"sandstorm"`
+	Network   NetworkFileConfig         `toml:"network"`
+	Providers ProvidersFileConfig       `toml:"providers"`
 }
 
 type LocalFileConfig struct {
-	Provider  string              `toml:"provider"`
-	Network   NetworkFileConfig   `toml:"network"`
-	Providers ProvidersFileConfig `toml:"providers"`
+	Provider  string                    `toml:"provider"`
+	Sandstorm SandstormConfigFileConfig `toml:"sandstorm"`
+	Network   NetworkFileConfig         `toml:"network"`
+	Providers ProvidersFileConfig       `toml:"providers"`
+}
+
+type SandstormConfigFileConfig struct {
+	DownloadURL string `toml:"download_url"`
 }
 
 type NetworkFileConfig struct {
-	Sandstorm SandstormFileConfig `toml:"sandstorm"`
+	Sandstorm SandstormNetworkFileConfig `toml:"sandstorm"`
 }
 
-type SandstormFileConfig struct {
+type SandstormNetworkFileConfig struct {
 	Host          string `toml:"host"`
 	GuestPort     int    `toml:"guest_port"`
 	ExternalPort  int    `toml:"external_port"`
@@ -63,18 +70,23 @@ type LimaFileConfig struct {
 }
 
 type Resolved struct {
-	Stack    string
-	Provider domain.ProviderName
-	Network  NetworkResolved
-	Vagrant  VagrantResolved
-	Lima     LimaResolved
+	Stack     string
+	Provider  domain.ProviderName
+	Sandstorm SandstormConfigResolved
+	Network   NetworkResolved
+	Vagrant   VagrantResolved
+	Lima      LimaResolved
+}
+
+type SandstormConfigResolved struct {
+	DownloadURL string
 }
 
 type NetworkResolved struct {
-	Sandstorm SandstormResolved
+	Sandstorm SandstormNetworkResolved
 }
 
-type SandstormResolved struct {
+type SandstormNetworkResolved struct {
 	Host          string
 	GuestPort     int
 	ExternalPort  int
@@ -143,9 +155,11 @@ func Load(workDir string, providerOverride domain.ProviderName, defaultProvider 
 	if project.Stack != "" {
 		resolved.Stack = project.Stack
 	}
+	mergeSandstorm(&resolved.Sandstorm, project.Sandstorm)
 	mergeNetwork(&resolved.Network, project.Network)
 	mergeProviders(&resolved.Vagrant, &resolved.Lima, project.Providers)
 
+	mergeSandstorm(&resolved.Sandstorm, local.Sandstorm)
 	mergeNetwork(&resolved.Network, local.Network)
 	mergeProviders(&resolved.Vagrant, &resolved.Lima, local.Providers)
 
@@ -203,7 +217,7 @@ image_arch = %q
 }
 
 func InitialLocal(provider domain.ProviderName) []byte {
-	return []byte(fmt.Sprintf("provider = %q\n", provider))
+	return renderLocalFile(LocalFileConfig{Provider: string(provider)})
 }
 
 func LegacyResolved(stack string, provider domain.ProviderName) *Resolved {
@@ -222,8 +236,9 @@ func decode(data []byte, target any) error {
 func defaults() Resolved {
 	lima := mustLimaDefaults()
 	return Resolved{
+		Sandstorm: SandstormConfigResolved{},
 		Network: NetworkResolved{
-			Sandstorm: SandstormResolved{
+			Sandstorm: SandstormNetworkResolved{
 				Host:          "local.sandstorm.io",
 				GuestPort:     6090,
 				ExternalPort:  6090,
@@ -232,6 +247,12 @@ func defaults() Resolved {
 		},
 		Vagrant: VagrantResolved{Box: "debian/bookworm64"},
 		Lima:    lima,
+	}
+}
+
+func mergeSandstorm(dst *SandstormConfigResolved, src SandstormConfigFileConfig) {
+	if src.DownloadURL != "" {
+		dst.DownloadURL = src.DownloadURL
 	}
 }
 
@@ -353,6 +374,12 @@ func validateResolved(resolved *Resolved) error {
 	if ip := net.ParseIP(resolved.Network.Sandstorm.Host); ip != nil && ip.IsUnspecified() {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "network.sandstorm.host must not be an unspecified address"}
 	}
+	if resolved.Sandstorm.DownloadURL != "" {
+		parsed, err := url.Parse(resolved.Sandstorm.DownloadURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "sandstorm.download_url must be an absolute URL"}
+		}
+	}
 	if strings.TrimSpace(resolved.Vagrant.Box) == "" {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.vagrant.box is required"}
 	}
@@ -372,4 +399,113 @@ func validateResolved(resolved *Resolved) error {
 		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.Load", Message: "providers.lima.arch must match providers.lima.image_arch"}
 	}
 	return nil
+}
+
+func UpdateLocalSandstormDownloadURL(workDir, downloadURL string) error {
+	localPath := filepath.Join(workDir, ".sandstorm", LocalFile)
+	local := LocalFileConfig{}
+
+	data, err := os.ReadFile(localPath)
+	switch {
+	case err == nil:
+		if err := decode(data, &local); err != nil {
+			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.UpdateLocalSandstormDownloadURL", Message: fmt.Sprintf("parse .sandstorm/%s: %v", LocalFile, err)}
+		}
+	case errors.Is(err, os.ErrNotExist):
+	default:
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormDownloadURL", "read local config", err)
+	}
+
+	local.Sandstorm.DownloadURL = strings.TrimSpace(downloadURL)
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormDownloadURL", "create local config directory", err)
+	}
+	if err := os.WriteFile(localPath, renderLocalFile(local), 0o644); err != nil {
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormDownloadURL", "write local config", err)
+	}
+	return nil
+}
+
+func UpdateLocalSandstormPorts(workDir string, port int) error {
+	localPath := filepath.Join(workDir, ".sandstorm", LocalFile)
+	local := LocalFileConfig{}
+
+	data, err := os.ReadFile(localPath)
+	switch {
+	case err == nil:
+		if err := decode(data, &local); err != nil {
+			return &domain.Error{Code: domain.ErrInvalidArgument, Op: "config.UpdateLocalSandstormPorts", Message: fmt.Sprintf("parse .sandstorm/%s: %v", LocalFile, err)}
+		}
+	case errors.Is(err, os.ErrNotExist):
+	default:
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormPorts", "read local config", err)
+	}
+
+	local.Network.Sandstorm.GuestPort = port
+	local.Network.Sandstorm.ExternalPort = port
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormPorts", "create local config directory", err)
+	}
+	if err := os.WriteFile(localPath, renderLocalFile(local), 0o644); err != nil {
+		return domain.Wrap(domain.ErrExternal, "config.UpdateLocalSandstormPorts", "write local config", err)
+	}
+	return nil
+}
+
+func renderLocalFile(local LocalFileConfig) []byte {
+	var buf bytes.Buffer
+	if strings.TrimSpace(local.Provider) != "" {
+		fmt.Fprintf(&buf, "provider = %q\n", local.Provider)
+	}
+	if strings.TrimSpace(local.Sandstorm.DownloadURL) != "" {
+		if buf.Len() > 0 {
+			buf.WriteByte('\n')
+		}
+		fmt.Fprintf(&buf, "[sandstorm]\ndownload_url = %q\n", local.Sandstorm.DownloadURL)
+	}
+	if strings.TrimSpace(local.Network.Sandstorm.Host) != "" || local.Network.Sandstorm.GuestPort != 0 || local.Network.Sandstorm.ExternalPort != 0 || local.Network.Sandstorm.LocalhostOnly != nil {
+		if buf.Len() > 0 {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString("[network.sandstorm]\n")
+		if strings.TrimSpace(local.Network.Sandstorm.Host) != "" {
+			fmt.Fprintf(&buf, "host = %q\n", local.Network.Sandstorm.Host)
+		}
+		if local.Network.Sandstorm.GuestPort != 0 {
+			fmt.Fprintf(&buf, "guest_port = %d\n", local.Network.Sandstorm.GuestPort)
+		}
+		if local.Network.Sandstorm.ExternalPort != 0 {
+			fmt.Fprintf(&buf, "external_port = %d\n", local.Network.Sandstorm.ExternalPort)
+		}
+		if local.Network.Sandstorm.LocalhostOnly != nil {
+			fmt.Fprintf(&buf, "localhost_only = %t\n", *local.Network.Sandstorm.LocalhostOnly)
+		}
+	}
+	if strings.TrimSpace(local.Providers.Vagrant.Box) != "" {
+		if buf.Len() > 0 {
+			buf.WriteByte('\n')
+		}
+		fmt.Fprintf(&buf, "[providers.vagrant]\nbox = %q\n", local.Providers.Vagrant.Box)
+	}
+	if strings.TrimSpace(local.Providers.Lima.VMType) != "" || strings.TrimSpace(local.Providers.Lima.Arch) != "" || strings.TrimSpace(local.Providers.Lima.Image) != "" || strings.TrimSpace(local.Providers.Lima.ImageArch) != "" {
+		if buf.Len() > 0 {
+			buf.WriteByte('\n')
+		}
+		buf.WriteString("[providers.lima]\n")
+		if strings.TrimSpace(local.Providers.Lima.VMType) != "" {
+			fmt.Fprintf(&buf, "vm_type = %q\n", local.Providers.Lima.VMType)
+		}
+		if strings.TrimSpace(local.Providers.Lima.Arch) != "" {
+			fmt.Fprintf(&buf, "arch = %q\n", local.Providers.Lima.Arch)
+		}
+		if strings.TrimSpace(local.Providers.Lima.Image) != "" {
+			fmt.Fprintf(&buf, "image = %q\n", local.Providers.Lima.Image)
+		}
+		if strings.TrimSpace(local.Providers.Lima.ImageArch) != "" {
+			fmt.Fprintf(&buf, "image_arch = %q\n", local.Providers.Lima.ImageArch)
+		}
+	}
+	return buf.Bytes()
 }

@@ -298,14 +298,18 @@ func (d *serviceDeps) projectContext(workDir string, state *domain.ProjectState,
 }
 
 func renderRuntimeEnv(resolved *config.Resolved) []byte {
-	return []byte(fmt.Sprintf("SANDSTORM_HOST=%s\nSANDSTORM_EXTERNAL_PORT=%d\nSANDSTORM_GUEST_PORT=%d\nSANDSTORM_BASE_URL=http://%s:%d\nSANDSTORM_WILDCARD_HOST=%s\n",
+	body := fmt.Sprintf("SANDSTORM_HOST=%s\nSANDSTORM_EXTERNAL_PORT=%d\nSANDSTORM_GUEST_PORT=%d\nSANDSTORM_BASE_URL=http://%s:%d\nSANDSTORM_WILDCARD_HOST=%s\n",
 		resolved.Network.Sandstorm.Host,
 		resolved.Network.Sandstorm.ExternalPort,
 		resolved.Network.Sandstorm.GuestPort,
 		resolved.Network.Sandstorm.Host,
 		resolved.Network.Sandstorm.ExternalPort,
 		config.WildcardHost(resolved.Network.Sandstorm.Host, resolved.Network.Sandstorm.ExternalPort),
-	))
+	)
+	if resolved.Sandstorm.DownloadURL != "" {
+		body += fmt.Sprintf("SANDSTORM_DOWNLOAD_URL=%s\n", resolved.Sandstorm.DownloadURL)
+	}
+	return []byte(body)
 }
 
 func copyFile(src, dst string) error {
@@ -412,6 +416,45 @@ func localConfigUsesProvider(path string, provider domain.ProviderName) (bool, e
 		return false, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.SetupVM", Message: fmt.Sprintf("parse .sandstorm/%s: %v", config.LocalFile, err)}
 	}
 	return domain.ProviderName(local.Provider) == provider, nil
+}
+
+func (d *serviceDeps) persistSandstormDownloadURLOverride(workDir, downloadURL string) error {
+	if strings.TrimSpace(downloadURL) == "" {
+		return nil
+	}
+	if err := config.UpdateLocalSandstormDownloadURL(workDir, downloadURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *serviceDeps) persistSandstormPortOverride(workDir string, port int) error {
+	if port == 0 {
+		return nil
+	}
+	if err := config.UpdateLocalSandstormPorts(workDir, port); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *serviceDeps) refreshGeneratedFiles(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, *config.Resolved, providers.RuntimeProvider, error) {
+	projectState, resolved, plugin, err := d.loadRuntimeProject(ctx, workDir, providerOverride)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	renderer, err := d.providers.BootstrapRenderer(resolved.Provider)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	files, err := d.generatedFiles(workDir, projectState, resolved, renderer)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := d.writeFiles(workDir, files); err != nil {
+		return nil, nil, nil, err
+	}
+	return projectState, resolved, plugin, nil
 }
 
 func inferProviderFromLegacyFiles(sandstormDir string) domain.ProviderName {

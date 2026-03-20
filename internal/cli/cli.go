@@ -52,12 +52,12 @@ type SkillApp interface {
 }
 
 type VMApp interface {
-	VMCreate(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
-	VMUp(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	VMCreate(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
+	VMUp(context.Context, string, domain.ProviderName, int) (*domain.ProjectState, error)
 	VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMDestroy(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMStatus(context.Context, string, domain.ProviderName) (providers.Status, error)
-	VMProvision(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	VMProvision(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
 	VMSSH(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
 }
 
@@ -315,31 +315,73 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		return printVMHelp(out)
 	}
 	switch args[0] {
-	case "create", "up", "halt", "destroy", "status", "provision", "ssh":
+	case "create":
+		flags := flag.NewFlagSet("vm create", flag.ContinueOnError)
+		downloadURL := flags.String("sandstorm-download-url", "", "persist a machine-local Sandstorm package tarball URL into .sandstorm/box.local.toml before provisioning")
+		showHelp := flags.Bool("help", false, "show help")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *showHelp {
+			return printVMHelp(out)
+		}
+		state, err := app.VMCreate(ctx, workDir, providerOverride, *downloadURL)
+		return respond(out, format, state, err)
+	case "up":
+		flags := flag.NewFlagSet("vm up", flag.ContinueOnError)
+		flags.SetOutput(out)
+		flags.Usage = func() {
+			_, _ = fmt.Fprint(out, `Usage of vm up:
+  --help
+    	show help
+  --port int
+    	persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup
+`)
+		}
+		port := flags.Int("port", 0, "persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup")
+		showHelp := flags.Bool("help", false, "show help")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *showHelp {
+			return printVMHelp(out)
+		}
+		state, err := app.VMUp(ctx, workDir, providerOverride, *port)
+		return respond(out, format, state, err)
+	case "halt":
 		if len(args) > 1 && args[1] == "--help" {
 			return printVMHelp(out)
 		}
-	}
-	switch args[0] {
-	case "create":
-		state, err := app.VMCreate(ctx, workDir, providerOverride)
-		return respond(out, format, state, err)
-	case "up":
-		state, err := app.VMUp(ctx, workDir, providerOverride)
-		return respond(out, format, state, err)
-	case "halt":
 		state, err := app.VMHalt(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
 	case "destroy":
+		if len(args) > 1 && args[1] == "--help" {
+			return printVMHelp(out)
+		}
 		state, err := app.VMDestroy(ctx, workDir, providerOverride)
 		return respond(out, format, state, err)
 	case "status":
+		if len(args) > 1 && args[1] == "--help" {
+			return printVMHelp(out)
+		}
 		status, err := app.VMStatus(ctx, workDir, providerOverride)
 		return respond(out, format, status, err)
 	case "provision":
-		state, err := app.VMProvision(ctx, workDir, providerOverride)
+		flags := flag.NewFlagSet("vm provision", flag.ContinueOnError)
+		downloadURL := flags.String("sandstorm-download-url", "", "persist a machine-local Sandstorm package tarball URL into .sandstorm/box.local.toml before provisioning")
+		showHelp := flags.Bool("help", false, "show help")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *showHelp {
+			return printVMHelp(out)
+		}
+		state, err := app.VMProvision(ctx, workDir, providerOverride, *downloadURL)
 		return respond(out, format, state, err)
 	case "ssh":
+		if len(args) > 1 && args[1] == "--help" {
+			return printVMHelp(out)
+		}
 		state, err := app.VMSSH(ctx, workDir, args[1:], providerOverride)
 		return respond(out, format, state, err)
 	default:
@@ -410,12 +452,12 @@ func printVMHelp(out io.Writer) error {
 	_, err := fmt.Fprint(out, `vm manages provider instances for the current project.
 
 Usage:
-  vm create
-  vm up
+  vm create [--sandstorm-download-url <url>]
+  vm up [--port <port>]
   vm halt
   vm destroy
   vm status
-  vm provision
+  vm provision [--sandstorm-download-url <url>]
   vm ssh [args...]
 `)
 	return err

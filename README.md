@@ -55,6 +55,21 @@ requiring the VM to exist.
 existing VM without reprovisioning, and `spktool vm provision` reruns guest
 setup explicitly.
 
+To override the Sandstorm download mirror for one machine, add this to
+`.sandstorm/box.local.toml`:
+
+```toml
+[sandstorm]
+download_url = "https://mirror.example/sandstorm"
+```
+
+You can also persist the same local override while provisioning:
+
+```sh
+spktool vm create --sandstorm-download-url https://mirror.example/sandstorm
+spktool vm provision --sandstorm-download-url https://mirror.example/sandstorm
+```
+
 ## Agent Skills
 
 `spktool install-skills --codex` installs the embedded Sandstorm Codex skill to
@@ -123,7 +138,7 @@ Those aliases change the default provider based on `argv[0]`, so:
 - `--verbose` enables Lima serial boot tailing to help diagnose startup issues.
 - The generated `runtime.env` is consumed by `global-setup.sh` during
   provisioning and drives the Sandstorm bind address, external port, base URL,
-  and wildcard host.
+  wildcard host, and optional package mirror override.
 
 ## Acceptance Tests
 

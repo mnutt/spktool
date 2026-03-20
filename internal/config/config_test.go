@@ -40,6 +40,29 @@ image_arch = "x86_64"
 	if resolved.Provider != domain.ProviderLima || resolved.Stack != "meteor" {
 		t.Fatalf("unexpected resolved config: %+v", resolved)
 	}
+	if resolved.Sandstorm.DownloadURL != "" {
+		t.Fatalf("expected empty sandstorm download url by default, got %q", resolved.Sandstorm.DownloadURL)
+	}
+}
+
+func TestLoadPrefersLocalSandstormDownloadURL(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	writeConfigFile(t, workDir, ProjectFile, validProjectConfig())
+	writeConfigFile(t, workDir, LocalFile, `provider = "lima"
+
+[sandstorm]
+download_url = "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"
+`)
+
+	resolved, err := Load(workDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Sandstorm.DownloadURL != "https://downloads.example.test/sandstorm-0-fast-1.tar.xz" {
+		t.Fatalf("unexpected sandstorm download url: %+v", resolved.Sandstorm)
+	}
 }
 
 func TestLoadRejectsInvalidConfig(t *testing.T) {
@@ -94,6 +117,31 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 			name:        "unspecified host ip",
 			project:     replaceInValidProjectConfig(`host = "local.sandstorm.io"`, `host = "0.0.0.0"`),
 			wantMessage: "network.sandstorm.host must not be an unspecified address",
+		},
+		{
+			name: "invalid sandstorm download url",
+			project: `stack = "meteor"
+provider = "lima"
+
+[sandstorm]
+download_url = "not-a-url"
+
+[network.sandstorm]
+host = "local.sandstorm.io"
+guest_port = 6090
+external_port = 6090
+localhost_only = true
+
+[providers.vagrant]
+box = "debian/bookworm64"
+
+[providers.lima]
+vm_type = "qemu"
+arch = "x86_64"
+image = "https://example.test/debian-amd64.qcow2"
+image_arch = "x86_64"
+`,
+			wantMessage: "sandstorm.download_url must be an absolute URL",
 		},
 		{
 			name: "empty vagrant box",
@@ -194,5 +242,62 @@ func writeConfigFile(t *testing.T, workDir, name, body string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdateLocalSandstormDownloadURL(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	writeConfigFile(t, workDir, LocalFile, `provider = "lima"
+`)
+
+	if err := UpdateLocalSandstormDownloadURL(workDir, "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `provider = "lima"`) {
+		t.Fatalf("expected provider to be preserved, got:\n%s", body)
+	}
+	if !strings.Contains(body, `download_url = "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"`) {
+		t.Fatalf("expected download url to be written, got:\n%s", body)
+	}
+}
+
+func TestUpdateLocalSandstormPorts(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	writeConfigFile(t, workDir, LocalFile, `provider = "lima"
+
+[sandstorm]
+download_url = "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"
+`)
+
+	if err := UpdateLocalSandstormPorts(workDir, 7000); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", LocalFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `provider = "lima"`) {
+		t.Fatalf("expected provider to be preserved, got:\n%s", body)
+	}
+	if !strings.Contains(body, `download_url = "https://downloads.example.test/sandstorm-0-fast-1.tar.xz"`) {
+		t.Fatalf("expected download url to be preserved, got:\n%s", body)
+	}
+	if !strings.Contains(body, "guest_port = 7000") {
+		t.Fatalf("expected guest port to be written, got:\n%s", body)
+	}
+	if !strings.Contains(body, "external_port = 7000") {
+		t.Fatalf("expected external port to be written, got:\n%s", body)
 	}
 }

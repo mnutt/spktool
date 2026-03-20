@@ -14,25 +14,26 @@ import (
 )
 
 type fakeApp struct {
-	setupVM    func(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
-	renderCfg  func(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
-	dev        func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
-	add        func(context.Context, string, string) (*domain.ProjectState, error)
-	listUtils  func(context.Context) (*services.UtilityCatalog, error)
-	describe   func(context.Context, string) (*services.UtilityDetails, error)
-	install    func(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
-	pack       func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
-	verify     func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
-	publish    func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
-	keygen     func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
-	listkeys   func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
-	getkey     func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
-	enterGrain func(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
-	vmCreate   func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
-	vmUp       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
-	vmSSH      func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
-	status     func(context.Context, string, domain.ProviderName) (providers.Status, error)
-	stacks     []string
+	setupVM          func(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
+	renderCfg        func(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
+	dev              func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	add              func(context.Context, string, string) (*domain.ProjectState, error)
+	listUtils        func(context.Context) (*services.UtilityCatalog, error)
+	describe         func(context.Context, string) (*services.UtilityDetails, error)
+	install          func(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
+	pack             func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	verify           func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	publish          func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	keygen           func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
+	listkeys         func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
+	getkey           func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
+	enterGrain       func(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
+	vmCreate         func(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
+	vmUp             func(context.Context, string, domain.ProviderName, int) (*domain.ProjectState, error)
+	vmSSH            func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
+	status           func(context.Context, string, domain.ProviderName) (providers.Status, error)
+	vmProvision      func(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
+	stacks           []string
 }
 
 func (a *fakeApp) SetupVM(ctx context.Context, workDir string, provider domain.ProviderName, stack string, force bool) (*domain.ProjectState, error) {
@@ -83,11 +84,11 @@ func (a *fakeApp) GetKey(ctx context.Context, workDir, keyID string, provider do
 func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domain.ProviderName, noninteractive bool) (*domain.ProjectState, error) {
 	return a.enterGrain(ctx, workDir, provider, noninteractive)
 }
-func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
-	return a.vmCreate(ctx, workDir, provider)
+func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.ProviderName, downloadURL string) (*domain.ProjectState, error) {
+	return a.vmCreate(ctx, workDir, provider, downloadURL)
 }
-func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
-	return a.vmUp(ctx, workDir, provider)
+func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName, port int) (*domain.ProjectState, error) {
+	return a.vmUp(ctx, workDir, provider, port)
 }
 func (a *fakeApp) VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
 	panic("unexpected call")
@@ -98,8 +99,8 @@ func (a *fakeApp) VMDestroy(context.Context, string, domain.ProviderName) (*doma
 func (a *fakeApp) VMStatus(ctx context.Context, workDir string, provider domain.ProviderName) (providers.Status, error) {
 	return a.status(ctx, workDir, provider)
 }
-func (a *fakeApp) VMProvision(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
-	panic("unexpected call")
+func (a *fakeApp) VMProvision(ctx context.Context, workDir string, provider domain.ProviderName, downloadURL string) (*domain.ProjectState, error) {
+	return a.vmProvision(ctx, workDir, provider, downloadURL)
 }
 func (a *fakeApp) VMSSH(ctx context.Context, workDir string, args []string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.vmSSH(ctx, workDir, args, provider)
@@ -480,12 +481,15 @@ func TestRunVMCreateDispatchesToCreate(t *testing.T) {
 	var called bool
 	app := &fakeApp{
 		stacks: []string{"node"},
-		vmCreate: func(_ context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+		vmCreate: func(_ context.Context, workDir string, provider domain.ProviderName, downloadURL string) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
 			if provider != domain.ProviderVagrant {
 				t.Fatalf("unexpected provider: %q", provider)
+			}
+			if downloadURL != "" {
+				t.Fatalf("did not expect download url, got %q", downloadURL)
 			}
 			called = true
 			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
@@ -506,6 +510,88 @@ func TestRunVMCreateDispatchesToCreate(t *testing.T) {
 		t.Fatal("expected vm create dispatch")
 	}
 	if got := stdout.String(); got != "provider=vagrant stack=node vm=demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMProvisionParsesSandstormDownloadURL(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotURL string
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmProvision: func(_ context.Context, workDir string, provider domain.ProviderName, downloadURL string) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderLima {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			gotURL = downloadURL
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args: []string{
+			"--work-directory", "/workspace/app",
+			"--provider", "lima",
+			"vm", "provision",
+			"--sandstorm-download-url", "https://downloads.example.test/sandstorm-0-fast-1.tar.xz",
+		},
+		Stdout: &stdout,
+		Stderr: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotURL != "https://downloads.example.test/sandstorm-0-fast-1.tar.xz" {
+		t.Fatalf("unexpected download url: %q", gotURL)
+	}
+	if got := stdout.String(); got != "provider=lima stack=node vm=demo\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMUpParsesPortOverride(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotPort int
+	app := &fakeApp{
+		stacks: []string{"node"},
+		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName, port int) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			if provider != domain.ProviderLima {
+				t.Fatalf("unexpected provider: %q", provider)
+			}
+			gotPort = port
+			return &domain.ProjectState{Provider: provider, Stack: "node", VMInstance: "demo"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program: "spktool",
+		Args: []string{
+			"--work-directory", "/workspace/app",
+			"--provider", "lima",
+			"vm", "up",
+			"--port", "7000",
+		},
+		Stdout: &stdout,
+		Stderr: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPort != 7000 {
+		t.Fatalf("unexpected port override: %d", gotPort)
+	}
+	if got := stdout.String(); got != "provider=lima stack=node vm=demo\n" {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
@@ -1180,6 +1266,31 @@ func TestRunVMUnknownSubcommandShowsUsage(t *testing.T) {
 	}
 	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: vm create|up|halt|destroy|status|provision|ssh")) {
 		t.Fatalf("expected vm usage output, got %q", got)
+	}
+}
+
+func TestRunVMUpUnknownFlagShowsLongFormUsage(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"vm", "up", "--unknown"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	got := stdout.String()
+	if !bytes.Contains([]byte(got), []byte("Usage of vm up:")) {
+		t.Fatalf("expected vm up usage output, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("--port int")) {
+		t.Fatalf("expected long-form port flag in usage output, got %q", got)
+	}
+	if bytes.Contains([]byte(got), []byte("\n  -port int")) {
+		t.Fatalf("did not expect single-dash port flag in usage output, got %q", got)
 	}
 }
 

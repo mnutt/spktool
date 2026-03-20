@@ -9,10 +9,30 @@ import (
 	"github.com/mnutt/spktool/internal/providers"
 )
 
-func (s *VMLifecycleService) VMUp(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+func (s *VMLifecycleService) VMUp(ctx context.Context, workDir string, providerOverride domain.ProviderName, port int) (*domain.ProjectState, error) {
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
+	}
+	if port != 0 {
+		status, err := plugin.Status(ctx, s.deps.projectContext(workDir, projectState, resolved))
+		if err != nil {
+			return nil, wrapProviderStatusError("services.VMUp", projectState.Provider, err)
+		}
+		if vmStateExists(status.State) {
+			return nil, &domain.Error{
+				Code:    domain.ErrConflict,
+				Op:      "services.VMUp",
+				Message: fmt.Sprintf("vm instance %q already exists; rejecting `vm up --port`; destroy and recreate the VM to change forwarded ports", status.InstanceName),
+			}
+		}
+		if err := s.deps.persistSandstormPortOverride(workDir, port); err != nil {
+			return nil, err
+		}
+		projectState, resolved, plugin, err = s.deps.refreshGeneratedFiles(ctx, workDir, providerOverride)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := plugin.Up(ctx, s.deps.projectContext(workDir, projectState, resolved)); err != nil {
 		return nil, err
@@ -20,8 +40,11 @@ func (s *VMLifecycleService) VMUp(ctx context.Context, workDir string, providerO
 	return projectState, nil
 }
 
-func (s *VMLifecycleService) VMCreate(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
-	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
+func (s *VMLifecycleService) VMCreate(ctx context.Context, workDir string, providerOverride domain.ProviderName, sandstormDownloadURL string) (*domain.ProjectState, error) {
+	if err := s.deps.persistSandstormDownloadURLOverride(workDir, sandstormDownloadURL); err != nil {
+		return nil, err
+	}
+	projectState, resolved, plugin, err := s.deps.refreshGeneratedFiles(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +103,11 @@ func (s *VMLifecycleService) VMStatus(ctx context.Context, workDir string, provi
 	return status, nil
 }
 
-func (s *VMLifecycleService) VMProvision(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
-	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
+func (s *VMLifecycleService) VMProvision(ctx context.Context, workDir string, providerOverride domain.ProviderName, sandstormDownloadURL string) (*domain.ProjectState, error) {
+	if err := s.deps.persistSandstormDownloadURLOverride(workDir, sandstormDownloadURL); err != nil {
+		return nil, err
+	}
+	projectState, resolved, plugin, err := s.deps.refreshGeneratedFiles(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
