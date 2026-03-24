@@ -1235,7 +1235,7 @@ func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
 		t.Fatalf("unexpected helper path: %q", plugin.lastWriteFiles[1].Path)
 	}
 	interactive := strings.Join(plugin.lastInteractive, " ")
-	if !strings.Contains(interactive, "sudo -u sandstorm -g sandstorm bash -lc") {
+	if !strings.Contains(interactive, "sg sandstorm -c") {
 		t.Fatalf("unexpected interactive command: %q", interactive)
 	}
 	if !strings.Contains(interactive, "/opt/app/.sandstorm/build.sh &&") {

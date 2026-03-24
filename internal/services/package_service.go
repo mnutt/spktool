@@ -284,7 +284,7 @@ func (s *PackageService) devCommand(provider domain.ProviderName, wrapperPath st
 		return []string{
 			"bash", wrapperPath, "--",
 			"bash", "-lc",
-			buildCmd + " && sudo -u sandstorm -g sandstorm bash -lc " + devShellQuote(devCmd),
+			"sg sandstorm -c " + devShellQuote(buildCmd+" && "+devCmd),
 		}
 	default:
 		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd + " && " + devCmd}
