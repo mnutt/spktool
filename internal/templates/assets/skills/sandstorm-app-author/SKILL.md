@@ -1,6 +1,7 @@
 ---
 name: sandstorm-app-author
 description: Guidance for app authors packaging, integrating, debugging, and publishing Sandstorm apps. Use when creating or updating a Sandstorm app package, editing sandstorm-pkgdef.capnp, wiring Sandstorm auth or permissions, using powerbox or HTTP APIs, debugging dev-mode grains, or preparing an app for the Sandstorm app market.
+allowed-tools: Bash(spktool:list-utils) Bash(spktool:describe-util:*) Bash(spktool:add:*) Bash(spktool:install-skills) Bash(spktool:config:render) Bash(spktool:vm:status)
 ---
 
 # Sandstorm App Author
@@ -14,6 +15,7 @@ Prefer `spktool` over legacy `vagrant-spk` or `lima-spk`.
 - Most projects should use `spktool` from the project root.
 - `.sandstorm/box.toml` is the checked-in source of truth for stack, networking, and provider defaults.
 - `.sandstorm/box.local.toml` is for machine-local overrides such as provider choice.
+- Unless the user explicitly asks otherwise, do not install system-wide packages on the host and do not run the app on the host outside the VM.
 - Most apps use `sandstorm-http-bridge`.
 - App data should live under `/var`.
 - Sandstorm handles authentication. The app usually should not implement its own login flow.

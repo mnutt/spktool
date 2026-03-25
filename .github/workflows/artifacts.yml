@@ -1,0 +1,83 @@
+name: Build Artifacts
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags-ignore:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive_ext: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive_ext: zip
+          - goos: windows
+            goarch: arm64
+            archive_ext: zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+
+          dist_dir="dist/${GOOS}-${GOARCH}"
+          mkdir -p "${dist_dir}"
+
+          bin_name="spktool"
+          if [ "${GOOS}" = "windows" ]; then
+            bin_name="${bin_name}.exe"
+          fi
+
+          CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags="-s -w" -o "${dist_dir}/${bin_name}" ./cmd/spktool
+          cp README.md "${dist_dir}/README.md"
+
+          archive_name="spktool_${GOOS}_${GOARCH}.${ARCHIVE_EXT}"
+          if [ "${ARCHIVE_EXT}" = "zip" ]; then
+            (
+              cd "${dist_dir}"
+              zip -9 "../${archive_name}" "${bin_name}" README.md
+            )
+          else
+            tar -C "${dist_dir}" -czf "dist/${archive_name}" "${bin_name}" README.md
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spktool-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/spktool_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+          retention-days: 14

@@ -34,7 +34,7 @@ func TestBootstrapFilesIncludeVagrantfile(t *testing.T) {
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
 			Vagrant: config.VagrantResolved{Box: "debian/bookworm64"},
-			Network: config.NetworkResolved{Sandstorm: config.SandstormResolved{
+			Network: config.NetworkResolved{Sandstorm: config.SandstormNetworkResolved{
 				Host:          "local.sandstorm.io",
 				GuestPort:     6090,
 				ExternalPort:  6020,
@@ -76,7 +76,7 @@ func TestBootstrapFilesOmitLocalhostOnlyHostIPWhenDisabled(t *testing.T) {
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
 			Vagrant: config.VagrantResolved{Box: "debian/bookworm64"},
-			Network: config.NetworkResolved{Sandstorm: config.SandstormResolved{
+			Network: config.NetworkResolved{Sandstorm: config.SandstormNetworkResolved{
 				Host:          "demo.local",
 				GuestPort:     6090,
 				ExternalPort:  6020,

@@ -168,15 +168,24 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 		state, err := apps.Grains.EnterGrain(ctx, global.WorkDir, providerOverride, global.NonInter)
 		return respond(cfg.Stdout, global.Output, state, err)
 	case "list-utils":
+		if len(args) > 1 && args[1] == "--help" {
+			return printListUtilsHelp(cfg.Stdout)
+		}
 		catalog, err := apps.Utility.ListUtilities(ctx)
 		return respond(cfg.Stdout, global.Output, catalog, err)
 	case "describe-util":
+		if len(args) > 1 && args[1] == "--help" {
+			return printDescribeUtilHelp(cfg.Stdout)
+		}
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "describe-util <name>")
 		}
 		details, err := apps.Utility.DescribeUtility(ctx, args[1])
 		return respond(cfg.Stdout, global.Output, details, err)
 	case "add":
+		if len(args) > 1 && args[1] == "--help" {
+			return printAddHelp(cfg.Stdout)
+		}
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "utility name is required", "add <util>")
 		}
@@ -348,7 +357,28 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		}
 		state, err := app.VMUp(ctx, workDir, providerOverride, *port)
 		return respond(out, format, state, err)
-	case "halt":
+	case "start":
+		flags := flag.NewFlagSet("vm start", flag.ContinueOnError)
+		flags.SetOutput(out)
+		flags.Usage = func() {
+			_, _ = fmt.Fprint(out, `Usage of vm start:
+  --help
+    	show help
+  --port int
+    	persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup
+`)
+		}
+		port := flags.Int("port", 0, "persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup")
+		showHelp := flags.Bool("help", false, "show help")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *showHelp {
+			return printVMHelp(out)
+		}
+		state, err := app.VMUp(ctx, workDir, providerOverride, *port)
+		return respond(out, format, state, err)
+	case "halt", "stop":
 		if len(args) > 1 && args[1] == "--help" {
 			return printVMHelp(out)
 		}
@@ -477,6 +507,33 @@ Flags:
 	return err
 }
 
+func printListUtilsHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `list-utils lists installable Sandstorm utilities.
+
+Usage:
+  list-utils
+`)
+	return err
+}
+
+func printDescribeUtilHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `describe-util shows details for an installable Sandstorm utility.
+
+Usage:
+  describe-util <name>
+`)
+	return err
+}
+
+func printAddHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `add installs a Sandstorm utility into the current project.
+
+Usage:
+  add <util>
+`)
+	return err
+}
+
 func resolveProvider(raw string, fallback domain.ProviderName) domain.ProviderName {
 	if raw != "" {
 		return domain.ProviderName(raw)
@@ -579,11 +636,11 @@ func renderText(out io.Writer, payload any) string {
 		if v == nil {
 			return ""
 		}
-		lines := make([]string, 0, len(v.Targets)+len(v.Files)+1)
+		lines := make([]string, 0, len(v.Targets)+len(v.Directories)+1)
 		if len(v.Targets) > 0 {
 			lines = append(lines, "targets: "+strings.Join(v.Targets, ", "))
 		}
-		lines = append(lines, v.Files...)
+		lines = append(lines, v.Directories...)
 		if v.GitignoreUpdated {
 			lines = append(lines, ".gitignore updated")
 		}

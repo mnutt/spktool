@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -29,6 +30,12 @@ type Provider struct {
 const forcedVMType = "qemu"
 
 var lookPath = exec.LookPath
+var userHomeDir = os.UserHomeDir
+var readDir = os.ReadDir
+var readFile = os.ReadFile
+var combinedOutput = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
 
 func New(r runner.Runner, repo *templates.Repository) *Provider {
 	return &Provider{runner: r, templates: repo}
@@ -48,7 +55,7 @@ func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers
 	if project.Config.Network.Sandstorm.LocalhostOnly {
 		hostIP = "\n    hostIP: 127.0.0.1"
 	}
-	mountType := defaultMountType()
+	mountType := defaultMountType(project.Config.Lima.Arch)
 	body := []byte(fmt.Sprintf(`arch: %s
 vmType: %s
 mountType: %s
@@ -268,14 +275,82 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-func defaultMountType() string {
+func defaultMountType(arch string) string {
 	if runtime.GOOS == "darwin" {
 		return "9p"
 	}
-	if _, err := lookPath("virtiofsd"); err == nil {
+	if _, err := findVirtiofsd(arch); err == nil {
 		return "virtiofs"
 	}
 	return "9p"
+}
+
+func findVirtiofsd(arch string) (string, error) {
+	qemuExe, err := qemuExecutable(arch)
+	if err != nil {
+		return "", err
+	}
+	homeDir, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+
+	type vhostUserBackend struct {
+		BackendType string `json:"type"`
+		Binary      string `json:"binary"`
+	}
+
+	const relativePath = "share/qemu/vhost-user"
+	binDir := filepath.Dir(qemuExe)
+	usrDir := filepath.Dir(binDir)
+	userLocalDir := filepath.Join(homeDir, ".local")
+
+	candidates := []string{
+		filepath.Join(userLocalDir, relativePath),
+		filepath.Join(usrDir, relativePath),
+	}
+	if usrDir != "/usr" {
+		candidates = append(candidates, filepath.Join("/usr", relativePath))
+	}
+
+	for _, vhostCfgsDir := range candidates {
+		cfgEntries, err := readDir(vhostCfgsDir)
+		if err != nil {
+			continue
+		}
+		for _, cfgEntry := range cfgEntries {
+			if cfgEntry.IsDir() || !strings.HasSuffix(cfgEntry.Name(), ".json") {
+				continue
+			}
+			var vhostCfg vhostUserBackend
+			contents, err := readFile(filepath.Join(vhostCfgsDir, cfgEntry.Name()))
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(contents, &vhostCfg); err != nil {
+				continue
+			}
+			if vhostCfg.BackendType != "fs" || vhostCfg.Binary == "" {
+				continue
+			}
+			if _, err := combinedOutput(vhostCfg.Binary, "--version"); err != nil {
+				continue
+			}
+			return vhostCfg.Binary, nil
+		}
+	}
+
+	return "", errors.New("failed to locate virtiofsd")
+}
+
+func qemuExecutable(arch string) (string, error) {
+	name := "qemu-system-" + arch
+	switch arch {
+	case "x86_64", "aarch64":
+		return lookPath(name)
+	default:
+		return "", fmt.Errorf("unsupported qemu arch %q", arch)
+	}
 }
 
 func limaInstanceExists(state string) bool {

@@ -3,6 +3,7 @@ package lima
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -57,6 +58,26 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 	t.Parallel()
 
 	provider := New(&captureRunner{}, templates.New())
+	wantMountType := "9p"
+	if runtime.GOOS != "darwin" {
+		prevLookPath := lookPath
+		prevUserHomeDir := userHomeDir
+		prevReadDir := readDir
+		prevReadFile := readFile
+		prevCombinedOutput := combinedOutput
+		lookPath = func(string) (string, error) { return "", errors.New("not found") }
+		userHomeDir = func() (string, error) { return "/home/tester", nil }
+		readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("not found") }
+		readFile = func(string) ([]byte, error) { return nil, errors.New("not found") }
+		combinedOutput = func(string, ...string) ([]byte, error) { return nil, nil }
+		t.Cleanup(func() {
+			lookPath = prevLookPath
+			userHomeDir = prevUserHomeDir
+			readDir = prevReadDir
+			readFile = prevReadFile
+			combinedOutput = prevCombinedOutput
+		})
+	}
 	files, err := provider.BootstrapFiles(providers.ProjectContext{
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
@@ -84,12 +105,6 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 	}
 	if !strings.Contains(string(files[0].Body), `location: "/workspace/demo"`) {
 		t.Fatalf("expected workdir mount in lima.yaml: %s", string(files[0].Body))
-	}
-	wantMountType := "9p"
-	if runtime.GOOS != "darwin" {
-		prevLookPath := lookPath
-		lookPath = func(string) (string, error) { return "", errors.New("not found") }
-		t.Cleanup(func() { lookPath = prevLookPath })
 	}
 	if !strings.Contains(string(files[0].Body), "mountType: "+wantMountType) {
 		t.Fatalf("expected qemu mount type override %q in lima.yaml: %s", wantMountType, string(files[0].Body))
@@ -119,8 +134,44 @@ func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
 
 	provider := New(&captureRunner{}, templates.New())
 	prevLookPath := lookPath
-	lookPath = func(string) (string, error) { return "/usr/bin/virtiofsd", nil }
-	t.Cleanup(func() { lookPath = prevLookPath })
+	prevUserHomeDir := userHomeDir
+	prevReadDir := readDir
+	prevReadFile := readFile
+	prevCombinedOutput := combinedOutput
+	tempDir := t.TempDir()
+	qemuBin := filepath.Join(tempDir, "bin")
+	vhostDir := filepath.Join(tempDir, "share", "qemu", "vhost-user")
+	if err := os.MkdirAll(qemuBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(vhostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vhostDir, "50-virtiofsd.json"), []byte(`{"type":"fs","binary":"/usr/lib/virtiofsd"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lookPath = func(name string) (string, error) {
+		if name == "qemu-system-aarch64" {
+			return filepath.Join(qemuBin, name), nil
+		}
+		return "", errors.New("not found")
+	}
+	userHomeDir = func() (string, error) { return "/home/tester", nil }
+	readDir = os.ReadDir
+	readFile = os.ReadFile
+	combinedOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "/usr/lib/virtiofsd" || len(args) != 1 || args[0] != "--version" {
+			t.Fatalf("unexpected virtiofsd probe: %s %v", name, args)
+		}
+		return []byte("virtiofsd 1.0"), nil
+	}
+	t.Cleanup(func() {
+		lookPath = prevLookPath
+		userHomeDir = prevUserHomeDir
+		readDir = prevReadDir
+		readFile = prevReadFile
+		combinedOutput = prevCombinedOutput
+	})
 	files, err := provider.BootstrapFiles(providers.ProjectContext{
 		WorkDir: "/workspace/demo",
 		Config: &config.Resolved{
@@ -162,23 +213,54 @@ func TestDefaultMountType(t *testing.T) {
 	t.Parallel()
 
 	prevLookPath := lookPath
-	t.Cleanup(func() { lookPath = prevLookPath })
+	prevUserHomeDir := userHomeDir
+	prevReadDir := readDir
+	prevReadFile := readFile
+	prevCombinedOutput := combinedOutput
+	t.Cleanup(func() {
+		lookPath = prevLookPath
+		userHomeDir = prevUserHomeDir
+		readDir = prevReadDir
+		readFile = prevReadFile
+		combinedOutput = prevCombinedOutput
+	})
 
 	if runtime.GOOS == "darwin" {
-		if got := defaultMountType(); got != "9p" {
+		if got := defaultMountType("x86_64"); got != "9p" {
 			t.Fatalf("expected darwin qemu mount type 9p, got %q", got)
 		}
 		return
 	}
 
-	lookPath = func(string) (string, error) { return "/usr/bin/virtiofsd", nil }
-	if got := defaultMountType(); got != "virtiofs" {
-		t.Fatalf("expected non-darwin mount type virtiofs when virtiofsd exists, got %q", got)
+	tempDir := t.TempDir()
+	qemuBin := filepath.Join(tempDir, "bin")
+	vhostDir := filepath.Join(tempDir, "share", "qemu", "vhost-user")
+	if err := os.MkdirAll(qemuBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(vhostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vhostDir, "50-virtiofsd.json"), []byte(`{"type":"fs","binary":"/usr/lib/virtiofsd"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lookPath = func(name string) (string, error) {
+		if name == "qemu-system-x86_64" {
+			return filepath.Join(qemuBin, name), nil
+		}
+		return "", errors.New("not found")
+	}
+	userHomeDir = func() (string, error) { return "/home/tester", nil }
+	readDir = os.ReadDir
+	readFile = os.ReadFile
+	combinedOutput = func(string, ...string) ([]byte, error) { return []byte("virtiofsd 1.0"), nil }
+	if got := defaultMountType("x86_64"); got != "virtiofs" {
+		t.Fatalf("expected non-darwin mount type virtiofs when qemu metadata advertises it, got %q", got)
 	}
 
 	lookPath = func(string) (string, error) { return "", errors.New("not found") }
-	if got := defaultMountType(); got != "9p" {
-		t.Fatalf("expected non-darwin mount type 9p when virtiofsd is missing, got %q", got)
+	if got := defaultMountType("x86_64"); got != "9p" {
+		t.Fatalf("expected non-darwin mount type 9p when qemu metadata is unavailable, got %q", got)
 	}
 }
 

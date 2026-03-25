@@ -20,6 +20,28 @@ const (
 	claudeSkillIgnoreDir = ".claude/skills/sandstorm-app-author/"
 )
 
+type skillInstallTarget struct {
+	name      string
+	dir       string
+	ignoreDir string
+	op        string
+}
+
+var skillTargets = map[string]skillInstallTarget{
+	codexSkillTarget: {
+		name:      codexSkillTarget,
+		dir:       filepath.Join(".codex", "skills", skillName),
+		ignoreDir: codexSkillIgnoreDir,
+		op:        "services.installCodexSkill",
+	},
+	claudeSkillTarget: {
+		name:      claudeSkillTarget,
+		dir:       filepath.Join(".claude", "skills", skillName),
+		ignoreDir: claudeSkillIgnoreDir,
+		op:        "services.installClaudeSkill",
+	},
+}
+
 type InstallSkillsRequest struct {
 	Codex          bool `json:"codex"`
 	Claude         bool `json:"claude"`
@@ -29,7 +51,7 @@ type InstallSkillsRequest struct {
 
 type InstallSkillsResult struct {
 	Targets          []string `json:"targets"`
-	Files            []string `json:"files"`
+	Directories      []string `json:"directories"`
 	GitignoreUpdated bool     `json:"gitignoreUpdated"`
 }
 
@@ -62,59 +84,46 @@ func (s *SkillService) InstallSkills(_ context.Context, workDir string, req Inst
 	result := &InstallSkillsResult{
 		Targets: append([]string(nil), targets...),
 	}
-	for _, target := range targets {
-		switch target {
-		case codexSkillTarget:
-			files, err := s.installCodexSkill(workDir, req.Force)
-			if err != nil {
-				return nil, err
-			}
-			result.Files = append(result.Files, files...)
-			updated, err := s.ensureGitignoreRule(workDir, codexSkillIgnoreDir)
-			if err != nil {
-				return nil, err
-			}
-			result.GitignoreUpdated = result.GitignoreUpdated || updated
-		case claudeSkillTarget:
-			files, err := s.installClaudeSkill(workDir, req.Force)
-			if err != nil {
-				return nil, err
-			}
-			result.Files = append(result.Files, files...)
-			updated, err := s.ensureGitignoreRule(workDir, claudeSkillIgnoreDir)
-			if err != nil {
-				return nil, err
-			}
-			result.GitignoreUpdated = result.GitignoreUpdated || updated
-		default:
-			return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.InstallSkills", Message: fmt.Sprintf("unsupported skill target %q", target)}
+	for _, name := range targets {
+		target, ok := skillTargets[name]
+		if !ok {
+			return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.InstallSkills", Message: fmt.Sprintf("unsupported skill target %q", name)}
 		}
+		if err := s.installSkillTarget(workDir, target, req.Force); err != nil {
+			return nil, err
+		}
+		result.Directories = append(result.Directories, filepath.ToSlash(target.dir)+"/")
+		updated, err := s.ensureGitignoreRule(workDir, target.ignoreDir)
+		if err != nil {
+			return nil, err
+		}
+		result.GitignoreUpdated = result.GitignoreUpdated || updated
 	}
 	return result, nil
 }
 
-func (s *SkillService) installCodexSkill(workDir string, force bool) ([]string, error) {
+func (s *SkillService) installSkillTarget(workDir string, target skillInstallTarget, force bool) error {
 	paths, err := s.deps.templates.SkillFiles(skillName)
 	if err != nil {
-		return nil, domain.Wrap(domain.ErrExternal, "services.installCodexSkill", "list embedded skill files", err)
+		return domain.Wrap(domain.ErrExternal, target.op, "list embedded skill files", err)
 	}
 	files := make([]providers.RenderedFile, 0, len(paths))
 	for _, rel := range paths {
 		body, err := s.deps.templates.SkillFile(skillName, rel)
 		if err != nil {
-			return nil, domain.Wrap(domain.ErrExternal, "services.installCodexSkill", "read embedded skill file", err)
+			return domain.Wrap(domain.ErrExternal, target.op, "read embedded skill file", err)
 		}
-		dest := filepath.Join(".codex", "skills", skillName, filepath.FromSlash(rel))
+		dest := filepath.Join(target.dir, filepath.FromSlash(rel))
 		full := filepath.Join(workDir, dest)
 		if !force {
 			if _, err := os.Stat(full); err == nil {
-				return nil, &domain.Error{
+				return &domain.Error{
 					Code:    domain.ErrConflict,
-					Op:      "services.installCodexSkill",
+					Op:      target.op,
 					Message: fmt.Sprintf("%s already exists; rerun with --force to overwrite", filepath.ToSlash(dest)),
 				}
 			} else if !errorsIsNotExist(err) {
-				return nil, domain.Wrap(domain.ErrExternal, "services.installCodexSkill", "read existing skill file", err)
+				return domain.Wrap(domain.ErrExternal, target.op, "read existing skill file", err)
 			}
 		}
 		files = append(files, providers.RenderedFile{
@@ -124,54 +133,9 @@ func (s *SkillService) installCodexSkill(workDir string, force bool) ([]string, 
 		})
 	}
 	if err := s.deps.writeFiles(workDir, files); err != nil {
-		return nil, err
+		return err
 	}
-
-	written := make([]string, 0, len(files))
-	for _, file := range files {
-		written = append(written, filepath.ToSlash(file.Path))
-	}
-	return written, nil
-}
-
-func (s *SkillService) installClaudeSkill(workDir string, force bool) ([]string, error) {
-	paths, err := s.deps.templates.SkillFiles(skillName)
-	if err != nil {
-		return nil, domain.Wrap(domain.ErrExternal, "services.installClaudeSkill", "list embedded skill files", err)
-	}
-	files := make([]providers.RenderedFile, 0, len(paths))
-	for _, rel := range paths {
-		body, err := s.deps.templates.SkillFile(skillName, rel)
-		if err != nil {
-			return nil, domain.Wrap(domain.ErrExternal, "services.installClaudeSkill", "read embedded skill file", err)
-		}
-		dest := filepath.Join(".claude", "skills", skillName, filepath.FromSlash(rel))
-		full := filepath.Join(workDir, dest)
-		if !force {
-			if _, err := os.Stat(full); err == nil {
-				return nil, &domain.Error{
-					Code:    domain.ErrConflict,
-					Op:      "services.installClaudeSkill",
-					Message: fmt.Sprintf("%s already exists; rerun with --force to overwrite", filepath.ToSlash(dest)),
-				}
-			} else if !errorsIsNotExist(err) {
-				return nil, domain.Wrap(domain.ErrExternal, "services.installClaudeSkill", "read existing skill file", err)
-			}
-		}
-		files = append(files, providers.RenderedFile{
-			Path: dest,
-			Body: body,
-			Mode: 0o644,
-		})
-	}
-	if err := s.deps.writeFiles(workDir, files); err != nil {
-		return nil, err
-	}
-	written := make([]string, 0, len(files))
-	for _, file := range files {
-		written = append(written, filepath.ToSlash(file.Path))
-	}
-	return written, nil
+	return nil
 }
 
 func (s *SkillService) ensureGitignoreRule(workDir, rule string) (bool, error) {
