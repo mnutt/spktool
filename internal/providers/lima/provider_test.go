@@ -322,7 +322,7 @@ func TestSSHStreamsWhenArgsAreProvided(t *testing.T) {
 		t.Fatal("expected streamed mode for ssh command")
 	}
 	got := strings.Join(r.spec.Args, " ")
-	if !strings.Contains(got, "shell sandstorm-demo-") || !strings.Contains(got, "sh -lc pwd") {
+	if !strings.Contains(got, "shell --workdir /opt/app sandstorm-demo-") || !strings.Contains(got, "sh -lc pwd") {
 		t.Fatalf("unexpected args: %q", got)
 	}
 }

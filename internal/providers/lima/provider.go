@@ -124,11 +124,7 @@ func (p *Provider) Destroy(ctx context.Context, project providers.ProjectContext
 }
 
 func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, args []string) error {
-	argv := []string{"shell"}
-	if len(args) == 0 {
-		argv = append(argv, "--workdir", "/opt/app")
-	}
-	argv = append(argv, p.DetectInstanceName(project.WorkDir))
+	argv := []string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir)}
 	argv = append(argv, args...)
 	spec := runner.Spec{Name: "lima-shell", Command: "limactl", Args: argv}
 	if len(args) == 0 {
