@@ -101,16 +101,18 @@ release tag in `.sandstorm/utils.toml`.
 
 This repo has a single Go entrypoint at `cmd/spktool`.
 
-Build the main binary:
+Build the main binary with `make`:
 
 ```sh
-GOCACHE=/tmp/go-build go build -o ./bin/spktool ./cmd/spktool
+make
 ```
+
+That writes the binary to `./bin/spktool`.
 
 Run it directly from the repo without creating a binary first:
 
 ```sh
-GOCACHE=/tmp/go-build go run ./cmd/spktool --help
+go run ./cmd/spktool --help
 ```
 
 If you want compatibility with the legacy command names, build `spktool` once
@@ -118,7 +120,7 @@ and add symlinks:
 
 ```sh
 mkdir -p ./bin
-GOCACHE=/tmp/go-build go build -o ./bin/spktool ./cmd/spktool
+make
 ln -sf spktool ./bin/lima-spk
 ln -sf spktool ./bin/vagrant-spk
 ```
@@ -148,11 +150,9 @@ gate so they do not run in the default unit-test lane.
 
 ```sh
 SPKTOOL_ACCEPTANCE_LIMA=1 \
-GOCACHE=/tmp/go-build \
 go test -tags=acceptance ./internal/acceptance -run TestLimaLifecycleAcceptance -count=1
 
 SPKTOOL_ACCEPTANCE_VAGRANT=1 \
-GOCACHE=/tmp/go-build \
 go test -tags=acceptance ./internal/acceptance -run TestVagrantLifecycleAcceptance -count=1
 ```
 
