@@ -113,7 +113,7 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 			Name: "build-package-in-guest",
 			Do: func(context.Context) error {
 				command := []string{
-					"cd", "/opt/app",
+					"cd", "/opt/app/.sandstorm",
 					"&&", "spk", "pack",
 					"--keyring=/host-dot-sandstorm/sandstorm-keyring",
 					"--pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef",
@@ -247,10 +247,13 @@ func (s *PackageService) devCommand(provider domain.ProviderName, wrapperPath st
 	devCmd := "cd /opt/app/.sandstorm && spk dev --pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef"
 	switch provider {
 	case domain.ProviderLima:
+		// Lima's rootless virtiofs mount only accepts creates using the host-mapped
+		// primary uid/gid. Refresh supplementary groups without switching the primary gid.
+		limaDevCmd := `sudo -n -u "$(id -un)" bash -lc ` + devShellQuote(buildCmd+" && "+devCmd)
 		return []string{
 			"bash", wrapperPath, "--",
 			"bash", "-lc",
-			"sg sandstorm -c " + devShellQuote(buildCmd+" && "+devCmd),
+			limaDevCmd,
 		}
 	default:
 		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd + " && " + devCmd}

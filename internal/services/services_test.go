@@ -1235,7 +1235,7 @@ func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
 		t.Fatalf("unexpected helper path: %q", plugin.lastWriteFiles[1].Path)
 	}
 	interactive := strings.Join(plugin.lastInteractive, " ")
-	if !strings.Contains(interactive, "sg sandstorm -c") {
+	if !strings.Contains(interactive, `sudo -n -u "$(id -un)" bash -lc`) {
 		t.Fatalf("unexpected interactive command: %q", interactive)
 	}
 	if !strings.Contains(interactive, "/opt/app/.sandstorm/build.sh &&") {
@@ -1744,7 +1744,9 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	}
 
 	gotCmd := strings.Join(plugin.lastExecCmd, " ")
-	if !strings.Contains(gotCmd, "spk pack") || !strings.Contains(gotCmd, "spk verify --details /tmp/sandstorm-package.spk") {
+	if !strings.Contains(gotCmd, "cd /opt/app/.sandstorm") ||
+		!strings.Contains(gotCmd, "spk pack") ||
+		!strings.Contains(gotCmd, "spk verify --details /tmp/sandstorm-package.spk") {
 		t.Fatalf("unexpected pack command: %q", gotCmd)
 	}
 	data, err := os.ReadFile(outputPath)
