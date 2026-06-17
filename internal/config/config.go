@@ -205,7 +205,7 @@ external_port = 6090
 localhost_only = true
 
 [providers.vagrant]
-box = "debian/bookworm64"
+box = "debian/trixie64"
 
 [providers.lima]
 vm_type = %q
@@ -244,7 +244,7 @@ func defaults() Resolved {
 				LocalhostOnly: true,
 			},
 		},
-		Vagrant: VagrantResolved{Box: "debian/bookworm64"},
+		Vagrant: VagrantResolved{Box: "debian/trixie64"},
 		Lima:    lima,
 	}
 }

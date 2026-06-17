@@ -24,7 +24,7 @@ external_port = 6090
 localhost_only = true
 
 [providers.vagrant]
-box = "debian/bookworm64"
+box = "debian/trixie64"
 
 [providers.lima]
 vm_type = "qemu"
@@ -133,7 +133,7 @@ external_port = 6090
 localhost_only = true
 
 [providers.vagrant]
-box = "debian/bookworm64"
+box = "debian/trixie64"
 
 [providers.lima]
 vm_type = "qemu"
@@ -147,7 +147,7 @@ image_arch = "x86_64"
 			name: "empty vagrant box",
 			project: strings.Replace(
 				replaceInValidProjectConfig(`provider = "lima"`, `provider = "vagrant"`),
-				`box = "debian/bookworm64"`,
+				`box = "debian/trixie64"`,
 				`box = "   "`,
 				1,
 			),
@@ -220,7 +220,7 @@ external_port = 6090
 localhost_only = true
 
 [providers.vagrant]
-box = "debian/bookworm64"
+box = "debian/trixie64"
 
 [providers.lima]
 vm_type = "qemu"
