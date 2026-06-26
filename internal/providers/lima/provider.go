@@ -141,6 +141,16 @@ func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, c
 	return p.runner.Run(ctx, runner.Spec{Name: "lima-exec", Command: "limactl", Args: argv})
 }
 
+func (p *Provider) ExecStream(ctx context.Context, project providers.ProjectContext, command []string) error {
+	_, err := p.runner.Run(ctx, runner.Spec{
+		Name:    "lima-exec-stream",
+		Command: "limactl",
+		Args:    append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
+		Stream:  true,
+	})
+	return err
+}
+
 func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
 	_, err := p.runner.Run(ctx, runner.Spec{
 		Name:        "lima-exec-interactive",

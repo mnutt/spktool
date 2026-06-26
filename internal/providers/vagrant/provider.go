@@ -87,6 +87,17 @@ func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, c
 	return p.runner.Run(ctx, runner.Spec{Name: "vagrant-exec", Command: "vagrant", Args: argv, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
 }
 
+func (p *Provider) ExecStream(ctx context.Context, project providers.ProjectContext, command []string) error {
+	_, err := p.runner.Run(ctx, runner.Spec{
+		Name:    "vagrant-exec-stream",
+		Command: "vagrant",
+		Args:    []string{"ssh", "-c", shellJoin(command)},
+		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
+		Stream:  true,
+	})
+	return err
+}
+
 func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
 	_, err := p.runner.Run(ctx, runner.Spec{
 		Name:        "vagrant-exec-interactive",

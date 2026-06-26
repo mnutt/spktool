@@ -40,6 +40,7 @@ type ProviderCore interface {
 
 type CommandExecutor interface {
 	Exec(context.Context, ProjectContext, []string) (runner.Result, error)
+	ExecStream(context.Context, ProjectContext, []string) error
 	ExecInteractive(context.Context, ProjectContext, []string) error
 	SSH(context.Context, ProjectContext, []string) error
 }

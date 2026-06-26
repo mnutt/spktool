@@ -113,6 +113,29 @@ func TestExecUsesVagrantSSHInSandstormDir(t *testing.T) {
 	}
 }
 
+func TestExecStreamUsesStreamingMode(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	if err := provider.ExecStream(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, []string{"echo", "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if r.spec.Command != "vagrant" {
+		t.Fatalf("unexpected command: %q", r.spec.Command)
+	}
+	if r.spec.Dir != filepath.Join("/workspace/demo", ".sandstorm", ".generated") {
+		t.Fatalf("unexpected dir: %q", r.spec.Dir)
+	}
+	if !r.spec.Stream || r.spec.Interactive {
+		t.Fatalf("expected streaming noninteractive exec, got stream=%v interactive=%v", r.spec.Stream, r.spec.Interactive)
+	}
+	got := strings.Join(r.spec.Args, " ")
+	if got != "ssh -c 'echo' 'hello'" {
+		t.Fatalf("unexpected args: %q", got)
+	}
+}
+
 func TestSSHUsesInteractiveModeWithoutArgs(t *testing.T) {
 	t.Parallel()
 

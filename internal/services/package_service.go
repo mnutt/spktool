@@ -2,13 +2,24 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/providers"
 	"github.com/mnutt/spktool/internal/workflow"
+)
+
+const (
+	keyringGuestPath       = "/host-dot-sandstorm/sandstorm-keyring"
+	devTestAppIDHostPath   = ".sandstorm/sandstorm-test-app-id"
+	devTestPkgdefPath      = "/tmp/spktool-dev-test-pkgdef.capnp"
+	pkgdefUtilGuestPath    = "/tmp/spktool-pkgdef-util.py"
+	capnpGuestImportPath   = "/opt/sandstorm/latest/usr/include"
+	defaultPkgdefGuestPath = "/opt/app/.sandstorm/sandstorm-pkgdef.capnp"
 )
 
 func (s *PackageService) Init(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -83,13 +94,28 @@ func (s *PackageService) Dev(ctx context.Context, workDir string, providerOverri
 	return projectState, nil
 }
 
-func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+func (s *PackageService) Build(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
+	if err != nil {
+		return nil, err
+	}
+	project := s.deps.projectContext(workDir, projectState, resolved)
+	if err := plugin.ExecStream(ctx, project, []string{"cd", "/opt/app", "&&", "sg", "sandstorm", "-c", "/opt/app/.sandstorm/build.sh"}); err != nil {
+		return nil, err
+	}
+	return projectState, nil
+}
+
+func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, opts PackOptions, providerOverride domain.ProviderName) (*PackResult, error) {
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
 	if outputPath == "" {
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Pack", Message: "output path is required"}
+	}
+	if opts.SetVersion != "" && !opts.Dev {
+		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Pack", Message: "--set-version may only be used with --dev"}
 	}
 
 	project := s.deps.projectContext(workDir, projectState, resolved)
@@ -98,8 +124,57 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 	if projectState.Provider == domain.ProviderVagrant {
 		guestArtifact = "/home/vagrant/sandstorm-package.spk"
 	}
+	var verifyOutput string
+	var appID string
+	var packageID string
+	pkgdefPath := defaultPkgdefGuestPath
+	pkgdefRef := pkgdefPath + ":pkgdef"
 
 	err = workflow.Run(ctx, "pack", []workflow.Step{
+		{
+			Name: "prepare-dev-pkgdef",
+			Do: func(context.Context) error {
+				if !opts.Dev {
+					return nil
+				}
+				id, err := s.ensureDevTestAppID(ctx, workDir, project, plugin)
+				if err != nil {
+					return err
+				}
+				appID = id
+				if err := s.writePkgdefUtil(ctx, project, plugin); err != nil {
+					return err
+				}
+				if _, err := plugin.Exec(ctx, project, []string{"command", "-v", "capnp", ">", "/dev/null"}); err != nil {
+					return domain.Wrap(domain.ErrExternal, "services.Pack", "`capnp` is required in the VM for `pack --dev`; rerun `spktool vm provision` to install capnproto", err)
+				}
+				command := []string{
+					"python3", pkgdefUtilGuestPath,
+					"--import-path", capnpGuestImportPath,
+					"/opt/app/.sandstorm/sandstorm-pkgdef.capnp",
+					appID,
+					"--append-title-suffix", " Test",
+					"--strip-signing",
+				}
+				if opts.SetVersion != "" {
+					command = append(command, "--set-version", opts.SetVersion)
+				}
+				command = append(command, "--output", devTestPkgdefPath)
+				if _, err := plugin.Exec(ctx, project, command); err != nil {
+					return err
+				}
+				pkgdefPath = devTestPkgdefPath
+				pkgdefRef = devTestPkgdefPath + ":pkgdef"
+				return nil
+			},
+			Rollback: func(context.Context) error {
+				if !opts.Dev {
+					return nil
+				}
+				_, err := plugin.Exec(ctx, project, []string{"rm", "-f", devTestPkgdefPath})
+				return err
+			},
+		},
 		{
 			Name: "remove-stale-host-artifact",
 			Do: func(context.Context) error {
@@ -115,14 +190,22 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 				command := []string{
 					"cd", "/opt/app/.sandstorm",
 					"&&", "spk", "pack",
-					"--keyring=/host-dot-sandstorm/sandstorm-keyring",
-					"--pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef",
+					"--keyring=" + keyringGuestPath,
+					"--pkg-def=" + pkgdefRef,
 					guestArtifact,
 					"&&", "spk", "verify", "--details", guestArtifact,
 					"&&", "mv", guestArtifact, "/opt/app/sandstorm-package.spk",
 				}
-				_, err := plugin.Exec(ctx, project, command)
+				result, err := plugin.Exec(ctx, project, command)
+				verifyOutput = result.Stdout
 				return err
+			},
+		},
+		{
+			Name: "resolve-package-id",
+			Do: func(context.Context) error {
+				packageID = s.packageIDFromPkgdef(ctx, project, plugin, pkgdefPath, verifyOutput)
+				return nil
 			},
 		},
 		{
@@ -131,11 +214,94 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 				return moveFile(hostArtifact, outputPath)
 			},
 		},
+		{
+			Name: "cleanup-dev-pkgdef",
+			Do: func(context.Context) error {
+				if !opts.Dev {
+					return nil
+				}
+				_, err := plugin.Exec(ctx, project, []string{"rm", "-f", devTestPkgdefPath})
+				return err
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return projectState, nil
+	return &PackResult{
+		Project:      projectState,
+		OutputPath:   outputPath,
+		PackageID:    packageID,
+		AppID:        appID,
+		Dev:          opts.Dev,
+		SetVersion:   opts.SetVersion,
+		VerifyOutput: verifyOutput,
+	}, nil
+}
+
+func (s *PackageService) packageIDFromPkgdef(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefPath, verifyOutput string) string {
+	if packageID, err := packageIDFromPkgdefWithCapnp(ctx, project, plugin, pkgdefPath); err == nil && packageID != "" {
+		return packageID
+	}
+	return parsePackageIDFallback(verifyOutput)
+}
+
+func packageIDFromPkgdefWithCapnp(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefPath string) (string, error) {
+	code := strings.Join([]string{
+		"import json, subprocess, sys",
+		"cmd = ['capnp', '-I', sys.argv[2], 'eval', '-ojson', '--short', sys.argv[1], 'pkgdef']",
+		"print(json.loads(subprocess.check_output(cmd, text=True))['id'])",
+	}, "\n")
+	result, err := plugin.Exec(ctx, project, []string{"python3", "-c", code, pkgdefPath, capnpGuestImportPath})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}
+
+func (s *PackageService) ensureDevTestAppID(ctx context.Context, workDir string, project providers.ProjectContext, plugin providers.RuntimeProvider) (string, error) {
+	path := filepath.Join(workDir, devTestAppIDHostPath)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		appID := strings.TrimSpace(string(data))
+		if appID != "" {
+			return appID, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "read dev test app id", err)
+	}
+
+	result, err := plugin.Exec(ctx, project, []string{"spk", "keygen", "--keyring=" + keyringGuestPath})
+	if err != nil {
+		return "", err
+	}
+	lines := nonEmptyLines(result.Stdout)
+	if len(lines) != 1 || !validAppID(lines[0]) {
+		return "", &domain.Error{
+			Code:    domain.ErrExternal,
+			Op:      "services.Pack",
+			Message: fmt.Sprintf("unexpected `spk keygen` output while creating dev test app id: %q", result.Stdout),
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "create .sandstorm directory for dev test app id", err)
+	}
+	if err := os.WriteFile(path, []byte(lines[0]+"\n"), 0o644); err != nil {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "write dev test app id", err)
+	}
+	return lines[0], nil
+}
+
+func (s *PackageService) writePkgdefUtil(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider) error {
+	body, err := s.deps.templates.HelperFile("pkgdef-util.py")
+	if err != nil {
+		return err
+	}
+	return plugin.WriteFile(ctx, project, providers.RenderedFile{
+		Path: pkgdefUtilGuestPath,
+		Body: body,
+		Mode: 0o755,
+	})
 }
 
 func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -258,6 +424,35 @@ func (s *PackageService) devCommand(provider domain.ProviderName, wrapperPath st
 	default:
 		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd + " && " + devCmd}
 	}
+}
+
+var (
+	packageIDFallbackPattern = regexp.MustCompile(`"packageId"\s*:\s*"([^"]+)"`)
+	appIDPattern             = regexp.MustCompile(`^[a-z0-9]{20,}$`)
+)
+
+func parsePackageIDFallback(output string) string {
+	match := packageIDFallbackPattern.FindStringSubmatch(output)
+	if len(match) < 2 {
+		return ""
+	}
+	return match[1]
+}
+
+func nonEmptyLines(output string) []string {
+	lines := strings.Split(output, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+func validAppID(id string) bool {
+	return appIDPattern.MatchString(id)
 }
 
 func devShellQuote(s string) string {

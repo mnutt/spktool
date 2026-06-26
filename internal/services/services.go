@@ -31,6 +31,21 @@ type ConfigRenderFile struct {
 	Body string `json:"body"`
 }
 
+type PackOptions struct {
+	Dev        bool   `json:"dev"`
+	SetVersion string `json:"setVersion,omitempty"`
+}
+
+type PackResult struct {
+	Project      *domain.ProjectState `json:"project"`
+	OutputPath   string               `json:"outputPath"`
+	PackageID    string               `json:"packageId,omitempty"`
+	AppID        string               `json:"appId,omitempty"`
+	Dev          bool                 `json:"dev"`
+	SetVersion   string               `json:"setVersion,omitempty"`
+	VerifyOutput string               `json:"verifyOutput,omitempty"`
+}
+
 type serviceDeps struct {
 	logger    *slog.Logger
 	templates *templates.Repository
