@@ -113,10 +113,14 @@ func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectConte
 	targetDir := filepath.Dir(file.Path)
 	command := []string{
 		"mkdir", "-p", targetDir,
-		"&&", "chmod", "755", targetDir,
+	}
+	if targetDir != "/" && targetDir != "/tmp" {
+		command = append(command, "&&", "chmod", "755", targetDir)
+	}
+	command = append(command,
 		"&&", "cat", ">", file.Path,
 		"&&", "chmod", strconv.FormatUint(uint64(file.Mode), 8), file.Path,
-	}
+	)
 	_, err := p.runner.Run(ctx, runner.Spec{
 		Name:    "vagrant-write-file",
 		Command: "vagrant",

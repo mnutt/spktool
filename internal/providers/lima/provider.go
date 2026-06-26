@@ -162,12 +162,17 @@ func (p *Provider) ExecInteractive(ctx context.Context, project providers.Projec
 }
 
 func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectContext, file providers.RenderedFile) error {
+	targetDir := filepath.Dir(file.Path)
 	command := []string{
-		"mkdir", "-p", filepath.Dir(file.Path),
-		"&&", "chmod", "755", filepath.Dir(file.Path),
+		"mkdir", "-p", targetDir,
+	}
+	if targetDir != "/" && targetDir != "/tmp" {
+		command = append(command, "&&", "chmod", "755", targetDir)
+	}
+	command = append(command,
 		"&&", "cat", ">", file.Path,
 		"&&", "chmod", strconv.FormatUint(uint64(file.Mode), 8), file.Path,
-	}
+	)
 	_, err := p.runner.Run(ctx, runner.Spec{
 		Name:    "lima-write-file",
 		Command: "limactl",

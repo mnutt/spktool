@@ -935,7 +935,6 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 				t.Fatalf("unexpected pack opts: %+v", opts)
 			}
 			return &services.PackResult{
-				Project:    &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"},
 				OutputPath: "out.spk",
 				PackageID:  "pkg123",
 			}, nil

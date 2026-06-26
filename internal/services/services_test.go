@@ -168,6 +168,49 @@ func flattenCommands(commands [][]string) []string {
 	return flattened
 }
 
+func writeTestPkgdef(t *testing.T, workDir, appID string) {
+	t.Helper()
+	body := `@0xabcdef;
+
+using Spk = import "/sandstorm/package.capnp";
+
+const pkgdef :Spk.PackageDefinition = (
+  id = "` + appID + `",
+  manifest = (
+    appTitle = (defaultText = "Test App"),
+    appMarketingVersion = (defaultText = "1.0.0"),
+    metadata = (
+      author = (
+        pgpSignature = embed "pgp-signature",
+        upstreamAuthor = "Upstream",
+      ),
+      pgpKeyring = embed "pgp-keyring",
+    ),
+  ),
+);
+`
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "sandstorm-pkgdef.capnp"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testPkgdefJSON(appID string) string {
+	return `{
+  "id": "` + appID + `",
+  "manifest": {
+    "appTitle": {"defaultText": "Test App"},
+    "appMarketingVersion": {"defaultText": "1.0.0"},
+    "metadata": {
+      "author": {
+        "pgpSignature": {"embed": "pgp-signature"},
+        "upstreamAuthor": "Upstream"
+      },
+      "pgpKeyring": {"embed": "pgp-keyring"}
+    }
+  }
+}`
+}
+
 type testServices struct {
 	*services.ProjectBootstrapService
 	*services.PackageService
@@ -306,7 +349,6 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 	if !strings.Contains(string(globalSetup), "capnproto") {
 		t.Fatalf("expected global setup to install capnproto, got %q", globalSetup)
 	}
-
 	stackData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile))
 	if err != nil {
 		t.Fatal(err)
@@ -1692,13 +1734,21 @@ func TestPackIncludesGuestCommandStderrInWorkflowError(t *testing.T) {
 	plugin := &fakePlugin{
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
-		execErr: &runner.CommandError{
-			Result: runner.Result{
-				Command:  "limactl shell --workdir /opt/app sandstorm-app-1234 bash -lc ...",
-				ExitCode: 1,
-				Stderr:   "bad alwaysInclude paths\nCap'n Proto parse error",
-			},
-			Err: &exec.ExitError{},
+		execResults: []runner.Result{
+			{Stdout: testPkgdefJSON("hostabcdefghijklmnop") + "\n"},
+		},
+		execHook: func(_ providers.ProjectContext, command []string) error {
+			if strings.Contains(strings.Join(command, " "), "spk pack") {
+				return &runner.CommandError{
+					Result: runner.Result{
+						Command:  "limactl shell --workdir /opt/app sandstorm-app-1234 bash -lc ...",
+						ExitCode: 1,
+						Stderr:   "bad alwaysInclude paths\nCap'n Proto parse error",
+					},
+					Err: &exec.ExitError{},
+				}
+			}
+			return nil
 		},
 	}
 	svc := newService(t, plugin, home)
@@ -1788,8 +1838,8 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
 		execResults: []runner.Result{
-			{Stdout: `{"packageId":"pkg-from-verify"}` + "\n"},
-			{Stdout: "pkg-from-capnp\n"},
+			{Stdout: testPkgdefJSON("hostabcdefghijklmnop") + "\n"},
+			{},
 		},
 		execHook: func(project providers.ProjectContext, _ []string) error {
 			return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
@@ -1800,12 +1850,14 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
+	hostPackageID := "hostabcdefghijklmnop"
+	writeTestPkgdef(t, workDir, hostPackageID)
 
 	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.OutputPath != outputPath || result.PackageID != "pkg-from-capnp" || result.Dev {
+	if result.OutputPath != outputPath || result.PackageID != hostPackageID || result.Dev {
 		t.Fatalf("unexpected pack result: %+v", result)
 	}
 
@@ -1824,7 +1876,7 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	}
 }
 
-func TestPackFallsBackToVerifyOutputPackageIDWhenCapnpParseFails(t *testing.T) {
+func TestPackRequiresPackageIDInHostPkgdef(t *testing.T) {
 	t.Parallel()
 
 	workDir := t.TempDir()
@@ -1833,11 +1885,10 @@ func TestPackFallsBackToVerifyOutputPackageIDWhenCapnpParseFails(t *testing.T) {
 	plugin := &fakePlugin{
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
-		execResult:     runner.Result{Stdout: `{"packageId":"pkg-from-verify"}` + "\n"},
-		execHook: func(project providers.ProjectContext, command []string) error {
-			if len(command) >= 2 && command[0] == "python3" && command[1] == "-c" {
-				return errors.New("capnp unavailable")
-			}
+		execResults: []runner.Result{
+			{Stdout: `{"noId":true}` + "\n"},
+		},
+		execHook: func(project providers.ProjectContext, _ []string) error {
 			return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
 		},
 	}
@@ -1846,13 +1897,16 @@ func TestPackFallsBackToVerifyOutputPackageIDWhenCapnpParseFails(t *testing.T) {
 	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
-
-	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{}, "")
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "sandstorm-pkgdef.capnp"), []byte("const pkgdef = (noId = true);\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if result.PackageID != "pkg-from-verify" {
-		t.Fatalf("expected verify-output package id fallback, got %+v", result)
+
+	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{}, "")
+	if err == nil {
+		t.Fatalf("expected missing package id error, got result %+v", result)
+	}
+	if !strings.Contains(err.Error(), "missing a valid id") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1867,11 +1921,9 @@ func TestPackDevGeneratesTestAppIDAndUsesTemporaryPkgdef(t *testing.T) {
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
 		execResults: []runner.Result{
+			{Stdout: testPkgdefJSON("originalabcdefghijkl") + "\n"},
 			{Stdout: testAppID + "\n"},
 			{},
-			{},
-			{Stdout: `{"packageId":"pkg-from-verify"}` + "\n"},
-			{Stdout: testAppID + "\n"},
 			{},
 		},
 		execHook: func(project providers.ProjectContext, command []string) error {
@@ -1886,6 +1938,7 @@ func TestPackDevGeneratesTestAppIDAndUsesTemporaryPkgdef(t *testing.T) {
 	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
+	writeTestPkgdef(t, workDir, "originalabcdefghijkl")
 
 	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{Dev: true, SetVersion: "sha123"}, "")
 	if err != nil {
@@ -1901,13 +1954,33 @@ func TestPackDevGeneratesTestAppIDAndUsesTemporaryPkgdef(t *testing.T) {
 	if strings.TrimSpace(string(data)) != testAppID {
 		t.Fatalf("unexpected persisted test app id: %q", data)
 	}
-	if len(plugin.lastWriteFiles) == 0 || plugin.lastWriteFiles[0].Path != "/tmp/spktool-pkgdef-util.py" {
-		t.Fatalf("expected pkgdef util upload, got %#v", plugin.lastWriteFiles)
+	if len(plugin.lastWriteFiles) == 0 || plugin.lastWriteFiles[0].Path != "/tmp/spktool-dev-test-pkgdef.json" {
+		t.Fatalf("expected dev pkgdef JSON upload, got %#v", plugin.lastWriteFiles)
+	}
+	var uploadedPkgdef map[string]any
+	if err := json.Unmarshal(plugin.lastWriteFiles[0].Body, &uploadedPkgdef); err != nil {
+		t.Fatal(err)
+	}
+	manifest := uploadedPkgdef["manifest"].(map[string]any)
+	if uploadedPkgdef["id"] != testAppID ||
+		manifest["appTitle"].(map[string]any)["defaultText"] != "Test App Test" ||
+		manifest["appMarketingVersion"].(map[string]any)["defaultText"] != "sha123" {
+		t.Fatalf("unexpected dev pkgdef JSON: %#v", uploadedPkgdef)
+	}
+	metadata := manifest["metadata"].(map[string]any)
+	author := metadata["author"].(map[string]any)
+	if _, ok := author["pgpSignature"]; ok {
+		t.Fatalf("expected author pgpSignature to be stripped: %#v", uploadedPkgdef)
+	}
+	if _, ok := metadata["pgpKeyring"]; ok {
+		t.Fatalf("expected pgpKeyring to be stripped: %#v", uploadedPkgdef)
 	}
 	commands := strings.Join(flattenCommands(plugin.execCommands), " ")
-	if !strings.Contains(commands, "--set-version sha123") ||
+	if !strings.Contains(commands, "capnp -I /opt/sandstorm/latest/usr/include eval -ojson --short /opt/app/.sandstorm/sandstorm-pkgdef.capnp pkgdef") ||
+		!strings.Contains(commands, "capnp -I /opt/sandstorm/latest/usr/include convert --short json:text") ||
+		!strings.Contains(commands, "capnp id | sed -E") ||
 		!strings.Contains(commands, "--pkg-def=/tmp/spktool-dev-test-pkgdef.capnp:pkgdef") ||
-		!strings.Contains(commands, "rm -f /tmp/spktool-dev-test-pkgdef.capnp") {
+		!strings.Contains(commands, "rm -f /tmp/spktool-dev-test-pkgdef.json /tmp/spktool-dev-test-pkgdef.capnp") {
 		t.Fatalf("expected dev pack commands, got %q", commands)
 	}
 }

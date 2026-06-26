@@ -63,8 +63,10 @@ noninteractive build environments that should not need to pipe commands into
 `spktool pack --dev --set-version <version> <output.spk>` builds with a
 persistent test app identity stored in `.sandstorm/sandstorm-test-app-id`,
 rewrites a temporary package definition inside the VM, and returns structured
-package metadata. It uses `capnp` from the VM, which current spktool
-provisioning installs via `capnproto`. In GitHub Actions, prefer JSON output:
+package metadata. spktool asks VM-side `capnp` to parse the checked-in package
+definition, mutates the parsed JSON on the host, then asks VM-side `capnp` to
+write a temporary test package definition. In GitHub Actions, prefer JSON
+output:
 
 ```sh
 spktool --output json pack --dev --set-version "$GITHUB_SHA" build/app.spk

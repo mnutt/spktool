@@ -630,10 +630,7 @@ func renderText(out io.Writer, payload any) string {
 		if v == nil {
 			return ""
 		}
-		lines := make([]string, 0, 3)
-		if verify := strings.TrimRight(v.VerifyOutput, "\n"); verify != "" {
-			lines = append(lines, verify)
-		}
+		lines := make([]string, 0, 2)
 		if v.PackageID != "" {
 			lines = append(lines, "packageId="+v.PackageID)
 		}

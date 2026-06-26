@@ -136,6 +136,28 @@ func TestExecStreamUsesStreamingMode(t *testing.T) {
 	}
 }
 
+func TestWriteFileDoesNotChmodTmp(t *testing.T) {
+	t.Parallel()
+
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	err := provider.WriteFile(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, providers.RenderedFile{
+		Path: "/tmp/example.json",
+		Body: []byte("{}"),
+		Mode: 0o644,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(r.spec.Args, " ")
+	if strings.Contains(got, "chmod' '755' '/tmp") || strings.Contains(got, "chmod 755 /tmp") {
+		t.Fatalf("did not expect chmod on /tmp, got %q", got)
+	}
+	if !strings.Contains(got, "cat' > '/tmp/example.json") {
+		t.Fatalf("unexpected write command: %q", got)
+	}
+}
+
 func TestSSHUsesInteractiveModeWithoutArgs(t *testing.T) {
 	t.Parallel()
 
