@@ -83,30 +83,30 @@ func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, ar
 }
 
 func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
-	argv := []string{"ssh", "-c", shellJoin(command)}
-	return p.runner.Run(ctx, runner.Spec{Name: "vagrant-exec", Command: "vagrant", Args: argv, Dir: filepath.Join(project.WorkDir, ".sandstorm", ".generated")})
+	return p.runner.Run(ctx, p.execSpec(project, command, "vagrant-exec"))
 }
 
 func (p *Provider) ExecStream(ctx context.Context, project providers.ProjectContext, command []string) error {
-	_, err := p.runner.Run(ctx, runner.Spec{
-		Name:    "vagrant-exec-stream",
-		Command: "vagrant",
-		Args:    []string{"ssh", "-c", shellJoin(command)},
-		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
-		Stream:  true,
-	})
+	spec := p.execSpec(project, command, "vagrant-exec-stream")
+	spec.Stream = true
+	_, err := p.runner.Run(ctx, spec)
 	return err
 }
 
 func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
-	_, err := p.runner.Run(ctx, runner.Spec{
-		Name:        "vagrant-exec-interactive",
-		Command:     "vagrant",
-		Args:        []string{"ssh", "-c", shellJoin(command)},
-		Dir:         filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
-		Interactive: true,
-	})
+	spec := p.execSpec(project, command, "vagrant-exec-interactive")
+	spec.Interactive = true
+	_, err := p.runner.Run(ctx, spec)
 	return err
+}
+
+func (p *Provider) execSpec(project providers.ProjectContext, command []string, name string) runner.Spec {
+	return runner.Spec{
+		Name:    name,
+		Command: "vagrant",
+		Args:    []string{"ssh", "-c", shellJoin(command)},
+		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
+	}
 }
 
 func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectContext, file providers.RenderedFile) error {

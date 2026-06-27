@@ -301,7 +301,6 @@ func runPack(ctx context.Context, app PackageApp, out, errOut io.Writer, format,
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	dev := flags.Bool("dev", false, "build using test app identity")
-	pre := flags.Bool("pre", false, "build using test app identity")
 	setVersion := flags.String("set-version", "", "set manifest.appMarketingVersion.defaultText; requires --dev")
 	showHelp := flags.Bool("help", false, "show help")
 	if err := flags.Parse(args); err != nil {
@@ -314,7 +313,7 @@ func runPack(ctx context.Context, app PackageApp, out, errOut io.Writer, format,
 	if len(rest) < 1 {
 		return writeUsage(out, format, "pack output path is required", "pack [--dev] [--set-version <version>] <output.spk>")
 	}
-	opts := services.PackOptions{Dev: *dev || *pre, SetVersion: *setVersion}
+	opts := services.PackOptions{Dev: *dev, SetVersion: *setVersion}
 	if opts.SetVersion != "" && !opts.Dev {
 		return writeUsage(out, format, "--set-version may only be used with --dev", "pack --dev --set-version <version> <output.spk>")
 	}

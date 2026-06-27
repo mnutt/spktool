@@ -132,7 +132,7 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, o
 		return nil, err
 	}
 	defer func() {
-		_ = prepared.cleanup(ctx)
+		_ = prepared.cleanup()
 	}()
 
 	if err := os.Remove(hostArtifact); err != nil && !os.IsNotExist(err) {
@@ -158,13 +158,13 @@ type preparedPkgdef struct {
 	pkgdefRef string
 	appID     string
 	packageID string
-	cleanup   func(context.Context) error
+	cleanup   func() error
 }
 
 func (s *PackageService) preparePackPkgdef(ctx context.Context, workDir string, project providers.ProjectContext, plugin providers.RuntimeProvider, opts PackOptions) (preparedPkgdef, error) {
 	prepared := preparedPkgdef{
 		pkgdefRef: defaultPkgdefGuestPath + ":pkgdef",
-		cleanup:   func(context.Context) error { return nil },
+		cleanup:   func() error { return nil },
 	}
 	pkgdefJSON, err := s.guestPkgdefJSON(ctx, project, plugin, defaultPkgdefGuestPath)
 	if err != nil {
@@ -201,7 +201,7 @@ func (s *PackageService) preparePackPkgdef(ctx context.Context, workDir string, 
 		pkgdefRef: devTestPkgdefPath + ":pkgdef",
 		appID:     appID,
 		packageID: appID,
-		cleanup: func(context.Context) error {
+		cleanup: func() error {
 			_, err := plugin.Exec(ctx, project, []string{"rm", "-f", devTestPkgdefJSONPath, devTestPkgdefPath})
 			return err
 		},
@@ -433,7 +433,7 @@ func devPkgdefJSON(input []byte, appID, setVersion string) ([]byte, error) {
 		return nil, domain.Wrap(domain.ErrInvalidArgument, "services.devPkgdefJSON", "parse package definition JSON", err)
 	}
 	pkgdef["id"] = appID
-	if err := appendJSONDefaultText(pkgdef, "manifest", "appTitle", " Test"); err != nil {
+	if err := appendJSONDefaultText(pkgdef, " Test", "manifest", "appTitle"); err != nil {
 		return nil, err
 	}
 	if setVersion != "" {
@@ -449,14 +449,10 @@ func devPkgdefJSON(input []byte, appID, setVersion string) ([]byte, error) {
 	return output, nil
 }
 
-func appendJSONDefaultText(root map[string]any, pathA, pathB, suffix string) error {
-	current, err := jsonObjectAt(root, pathA, pathB)
+func appendJSONDefaultText(root map[string]any, suffix string, path ...string) error {
+	text, current, err := jsonDefaultTextAt(root, "services.appendJSONDefaultText", path...)
 	if err != nil {
 		return err
-	}
-	text, ok := current["defaultText"].(string)
-	if !ok {
-		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.appendJSONDefaultText", Message: strings.Join([]string{pathA, pathB, "defaultText"}, ".") + " is missing or not a string"}
 	}
 	if !strings.HasSuffix(text, suffix) {
 		current["defaultText"] = text + suffix
@@ -465,15 +461,25 @@ func appendJSONDefaultText(root map[string]any, pathA, pathB, suffix string) err
 }
 
 func setJSONDefaultText(root map[string]any, value string, path ...string) error {
-	current, err := jsonObjectAt(root, path...)
+	_, current, err := jsonDefaultTextAt(root, "services.setJSONDefaultText", path...)
 	if err != nil {
 		return err
 	}
-	if _, ok := current["defaultText"].(string); !ok {
-		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.setJSONDefaultText", Message: strings.Join(append(path, "defaultText"), ".") + " is missing or not a string"}
-	}
 	current["defaultText"] = value
 	return nil
+}
+
+func jsonDefaultTextAt(root map[string]any, op string, path ...string) (string, map[string]any, error) {
+	current, err := jsonObjectAt(root, path...)
+	if err != nil {
+		return "", nil, err
+	}
+	text, ok := current["defaultText"].(string)
+	if !ok {
+		fullPath := append(append([]string(nil), path...), "defaultText")
+		return "", nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: op, Message: strings.Join(fullPath, ".") + " is missing or not a string"}
+	}
+	return text, current, nil
 }
 
 func jsonObjectAt(root map[string]any, path ...string) (map[string]any, error) {

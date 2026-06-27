@@ -137,28 +137,29 @@ func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, ar
 }
 
 func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
-	argv := append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command))
-	return p.runner.Run(ctx, runner.Spec{Name: "lima-exec", Command: "limactl", Args: argv})
+	return p.runner.Run(ctx, p.execSpec(project, command, "lima-exec"))
 }
 
 func (p *Provider) ExecStream(ctx context.Context, project providers.ProjectContext, command []string) error {
-	_, err := p.runner.Run(ctx, runner.Spec{
-		Name:    "lima-exec-stream",
-		Command: "limactl",
-		Args:    append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
-		Stream:  true,
-	})
+	spec := p.execSpec(project, command, "lima-exec-stream")
+	spec.Stream = true
+	_, err := p.runner.Run(ctx, spec)
 	return err
 }
 
 func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
-	_, err := p.runner.Run(ctx, runner.Spec{
-		Name:        "lima-exec-interactive",
-		Command:     "limactl",
-		Args:        append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
-		Interactive: true,
-	})
+	spec := p.execSpec(project, command, "lima-exec-interactive")
+	spec.Interactive = true
+	_, err := p.runner.Run(ctx, spec)
 	return err
+}
+
+func (p *Provider) execSpec(project providers.ProjectContext, command []string, name string) runner.Spec {
+	return runner.Spec{
+		Name:    name,
+		Command: "limactl",
+		Args:    append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
+	}
 }
 
 func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectContext, file providers.RenderedFile) error {
