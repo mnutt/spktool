@@ -55,8 +55,7 @@ func TestDetectInstanceNameSanitizesWorkspacePath(t *testing.T) {
 }
 
 func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
-	t.Parallel()
-
+	// This test replaces package-level dependency hooks and must remain serial.
 	provider := New(&captureRunner{}, templates.New())
 	wantMountType := "9p"
 	if runtime.GOOS != "darwin" {
@@ -130,8 +129,7 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 }
 
 func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
-	t.Parallel()
-
+	// This test replaces package-level dependency hooks and must remain serial.
 	provider := New(&captureRunner{}, templates.New())
 	prevLookPath := lookPath
 	prevUserHomeDir := userHomeDir
@@ -210,8 +208,7 @@ func TestBootstrapFilesUseConfiguredArm64Image(t *testing.T) {
 }
 
 func TestDefaultMountType(t *testing.T) {
-	t.Parallel()
-
+	// This test replaces package-level dependency hooks and must remain serial.
 	prevLookPath := lookPath
 	prevUserHomeDir := userHomeDir
 	prevReadDir := readDir
