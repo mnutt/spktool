@@ -126,6 +126,12 @@ make
 
 That writes the binary to `./bin/spktool`.
 
+Run the unit test suite with:
+
+```sh
+make test
+```
+
 Run it directly from the repo without creating a binary first:
 
 ```sh
