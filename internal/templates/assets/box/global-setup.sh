@@ -11,7 +11,12 @@ set -euo pipefail
 CURL_OPTS="--silent --show-error --location"
 echo localhost > /etc/hostname
 hostname localhost
-. /opt/app/.sandstorm/.generated/runtime.env
+RUNTIME_ENV=/opt/app/.sandstorm/.generated/runtime.env
+HAS_RUNTIME_ENV=false
+if [[ -f "${RUNTIME_ENV}" ]]; then
+    . "${RUNTIME_ENV}"
+    HAS_RUNTIME_ENV=true
+fi
 
 SANDSTORM_INSTALL_SCRIPT_URL="https://install.sandstorm.io/"
 SANDSTORM_PACKAGE_URL="${SANDSTORM_DOWNLOAD_URL:-}"
@@ -80,7 +85,11 @@ if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
 fi
 if [ ! -e /opt/sandstorm/latest/sandstorm ] ; then
     echo -n "Installing Sandstorm version ${SANDSTORM_CURRENT_VERSION}..."
-    REPORT=no bash /host-dot-sandstorm/caches/install.sh -d -e -p "${SANDSTORM_GUEST_PORT}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
+    INSTALL_ARGS=(-d -e)
+    if [[ "${HAS_RUNTIME_ENV}" == true ]]; then
+        INSTALL_ARGS+=(-p "${SANDSTORM_GUEST_PORT}")
+    fi
+    REPORT=no bash /host-dot-sandstorm/caches/install.sh "${INSTALL_ARGS[@]}" "/host-dot-sandstorm/caches/$SANDSTORM_PACKAGE" >/dev/null
     echo "...done."
 fi
 modprobe ip_tables
@@ -90,10 +99,14 @@ fi
 # Bind to all addresses, so the vagrant port-forward works.
 sudo sed --in-place='' \
         --expression='s/^BIND_IP=.*/BIND_IP=0.0.0.0/' \
-        --expression="s#^PORT=.*#PORT=${SANDSTORM_GUEST_PORT}#" \
-        --expression="s#^BASE_URL=.*#BASE_URL=${SANDSTORM_BASE_URL}#" \
-        --expression="s#^WILDCARD_HOST=.*#WILDCARD_HOST=${SANDSTORM_WILDCARD_HOST}#" \
         /opt/sandstorm/sandstorm.conf
+if [[ "${HAS_RUNTIME_ENV}" == true ]]; then
+    sudo sed --in-place='' \
+            --expression="s#^PORT=.*#PORT=${SANDSTORM_GUEST_PORT}#" \
+            --expression="s#^BASE_URL=.*#BASE_URL=${SANDSTORM_BASE_URL}#" \
+            --expression="s#^WILDCARD_HOST=.*#WILDCARD_HOST=${SANDSTORM_WILDCARD_HOST}#" \
+            /opt/sandstorm/sandstorm.conf
+fi
 
 # Force vagrant-spk to use the strict CSP, see sandstorm#3424 for details.
 echo 'ALLOW_LEGACY_RELAXED_CSP=false' >> /opt/sandstorm/sandstorm.conf
