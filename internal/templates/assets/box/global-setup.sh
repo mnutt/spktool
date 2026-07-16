@@ -26,8 +26,9 @@ apt-mark hold grub-pc || true
 apt-get update
 apt-get upgrade -y
 
-# Install curl needed below, and gnupg for package signing
-apt-get install -y curl gnupg netcat-openbsd
+# Install curl needed below, gnupg for package signing, capnp for temporary
+# package definition generation, and netcat for apt-cacher-ng detection.
+apt-get install -y curl gnupg capnproto netcat-openbsd
 
 # Make the primary guest user part of the sandstorm group so that commands like
 # `spk dev` work across providers.
