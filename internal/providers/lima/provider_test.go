@@ -109,6 +109,9 @@ func TestBootstrapFilesIncludeWorkdirMount(t *testing.T) {
 	if !strings.Contains(string(files[0].Body), "mountType: "+wantMountType) {
 		t.Fatalf("expected qemu mount type override %q in lima.yaml: %s", wantMountType, string(files[0].Body))
 	}
+	if !strings.Contains(string(files[0].Body), `timezone: ""`) {
+		t.Fatalf("expected lima.yaml to disable host timezone inference: %s", string(files[0].Body))
+	}
 	if !strings.Contains(string(files[0].Body), "images:") {
 		t.Fatalf("expected base image in lima.yaml: %s", string(files[0].Body))
 	}

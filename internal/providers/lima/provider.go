@@ -59,6 +59,7 @@ func (p *Provider) BootstrapFiles(project providers.ProjectContext) ([]providers
 	body := []byte(fmt.Sprintf(`arch: %s
 vmType: %s
 mountType: %s
+timezone: ""
 images:
   - location: %q
     arch: %q
