@@ -138,27 +138,43 @@ func (p *Provider) SSH(ctx context.Context, project providers.ProjectContext, ar
 }
 
 func (p *Provider) Exec(ctx context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
-	argv := append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command))
-	return p.runner.Run(ctx, runner.Spec{Name: "lima-exec", Command: "limactl", Args: argv})
+	return p.runner.Run(ctx, p.execSpec(project, command, "lima-exec"))
 }
 
-func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
-	_, err := p.runner.Run(ctx, runner.Spec{
-		Name:        "lima-exec-interactive",
-		Command:     "limactl",
-		Args:        append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
-		Interactive: true,
-	})
+func (p *Provider) ExecStream(ctx context.Context, project providers.ProjectContext, command []string) error {
+	spec := p.execSpec(project, command, "lima-exec-stream")
+	spec.Stream = true
+	_, err := p.runner.Run(ctx, spec)
 	return err
 }
 
+func (p *Provider) ExecInteractive(ctx context.Context, project providers.ProjectContext, command []string) error {
+	spec := p.execSpec(project, command, "lima-exec-interactive")
+	spec.Interactive = true
+	_, err := p.runner.Run(ctx, spec)
+	return err
+}
+
+func (p *Provider) execSpec(project providers.ProjectContext, command []string, name string) runner.Spec {
+	return runner.Spec{
+		Name:    name,
+		Command: "limactl",
+		Args:    append([]string{"shell", "--workdir", "/opt/app", p.DetectInstanceName(project.WorkDir), "bash", "-lc"}, shellJoin(command)),
+	}
+}
+
 func (p *Provider) WriteFile(ctx context.Context, project providers.ProjectContext, file providers.RenderedFile) error {
+	targetDir := filepath.Dir(file.Path)
 	command := []string{
-		"mkdir", "-p", filepath.Dir(file.Path),
-		"&&", "chmod", "755", filepath.Dir(file.Path),
+		"mkdir", "-p", targetDir,
+	}
+	if targetDir != "/" && targetDir != "/tmp" {
+		command = append(command, "&&", "chmod", "755", targetDir)
+	}
+	command = append(command,
 		"&&", "cat", ">", file.Path,
 		"&&", "chmod", strconv.FormatUint(uint64(file.Mode), 8), file.Path,
-	}
+	)
 	_, err := p.runner.Run(ctx, runner.Spec{
 		Name:    "lima-write-file",
 		Command: "limactl",

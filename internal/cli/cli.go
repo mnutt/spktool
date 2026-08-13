@@ -26,7 +26,8 @@ type ProjectBootstrapApp interface {
 type PackageApp interface {
 	Init(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	Dev(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
-	Pack(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	Build(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	Pack(context.Context, string, string, services.PackOptions, domain.ProviderName) (*services.PackResult, error)
 	Verify(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	Publish(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 }
@@ -134,12 +135,11 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 	case "dev":
 		state, err := apps.Packages.Dev(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
-	case "pack":
-		if len(args) < 2 {
-			return writeUsage(cfg.Stdout, global.Output, "pack output path is required", "pack <output.spk>")
-		}
-		state, err := apps.Packages.Pack(ctx, global.WorkDir, args[1], providerOverride)
+	case "build":
+		state, err := apps.Packages.Build(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
+	case "pack":
+		return runPack(ctx, apps.Packages, cfg.Stdout, cfg.Stderr, global.Output, global.WorkDir, providerOverride, args[1:])
 	case "verify":
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "verify spk path is required", "verify <input.spk>")
@@ -205,7 +205,7 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 		}
 		return runVM(ctx, apps.VM, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
 	default:
-		return writeUsage(cfg.Stdout, global.Output, fmt.Sprintf("command %q is not implemented yet", command), "setupvm|upgradevm|config|init|dev|pack|verify|publish|keygen|listkeys|getkey|enter-grain|list-utils|describe-util|add|install-skills|vm")
+		return writeUsage(cfg.Stdout, global.Output, fmt.Sprintf("command %q is not implemented yet", command), "setupvm|upgradevm|config|init|dev|build|pack|verify|publish|keygen|listkeys|getkey|enter-grain|list-utils|describe-util|add|install-skills|vm")
 	}
 }
 
@@ -295,6 +295,30 @@ func runSetupVM(ctx context.Context, app ProjectBootstrapApp, out, errOut io.Wri
 	}
 	state, err := app.SetupVM(ctx, workDir, providerOverride, rest[0], *force)
 	return respond(out, format, state, err)
+}
+
+func runPack(ctx context.Context, app PackageApp, out, errOut io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
+	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	dev := flags.Bool("dev", false, "build using test app identity")
+	setVersion := flags.String("set-version", "", "set manifest.appMarketingVersion.defaultText; requires --dev")
+	showHelp := flags.Bool("help", false, "show help")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *showHelp {
+		return printPackHelp(out)
+	}
+	rest := flags.Args()
+	if len(rest) < 1 {
+		return writeUsage(out, format, "pack output path is required", "pack [--dev] [--set-version <version>] <output.spk>")
+	}
+	opts := services.PackOptions{Dev: *dev, SetVersion: *setVersion}
+	if opts.SetVersion != "" && !opts.Dev {
+		return writeUsage(out, format, "--set-version may only be used with --dev", "pack --dev --set-version <version> <output.spk>")
+	}
+	result, err := app.Pack(ctx, workDir, rest[0], opts, providerOverride)
+	return respond(out, format, result, err)
 }
 
 func runInstallSkills(ctx context.Context, app SkillApp, out, errOut io.Writer, format, workDir string, nonInteractive bool, args []string) error {
@@ -429,6 +453,7 @@ Commands:
   config render
   init
   dev
+  build
   pack <output.spk>
   verify <input.spk>
   publish <input.spk>
@@ -474,6 +499,19 @@ func printConfigHelp(out io.Writer) error {
 
 Usage:
   config render
+`)
+	return err
+}
+
+func printPackHelp(out io.Writer) error {
+	_, err := fmt.Fprint(out, `pack builds a Sandstorm package.
+
+Usage:
+  pack [--dev] [--set-version <version>] <output.spk>
+
+Flags:
+  --dev                  build using test app identity
+  --set-version string   set manifest.appMarketingVersion.defaultText; requires --dev
 `)
 	return err
 }
@@ -587,6 +625,18 @@ func renderText(out io.Writer, payload any) string {
 		return formatProviderStatus(v, color)
 	case runner.Result:
 		return strings.TrimRight(v.Stdout, "\n")
+	case *services.PackResult:
+		if v == nil {
+			return ""
+		}
+		lines := make([]string, 0, 2)
+		if v.PackageID != "" {
+			lines = append(lines, "packageId="+v.PackageID)
+		}
+		if v.OutputPath != "" {
+			lines = append(lines, "package produced at "+v.OutputPath)
+		}
+		return strings.Join(lines, "\n")
 	case *services.ConfigRender:
 		if v == nil {
 			return ""

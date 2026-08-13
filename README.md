@@ -42,6 +42,7 @@ spktool setupvm node --provider lima
 spktool config render --provider lima
 spktool vm create --provider lima
 spktool init --provider lima
+spktool build --provider lima
 spktool install-skills --codex
 spktool list-utils
 spktool describe-util stay-awake
@@ -54,6 +55,22 @@ requiring the VM to exist.
 `spktool vm create` starts a VM and runs provisioning. `spktool vm up` starts an
 existing VM without reprovisioning, and `spktool vm provision` reruns guest
 setup explicitly.
+
+`spktool build` runs `.sandstorm/build.sh` inside the VM. This is intended for
+noninteractive build environments that should not need to pipe commands into
+`spktool vm ssh`.
+
+`spktool pack --dev --set-version <version> <output.spk>` builds with a
+persistent test app identity stored in `.sandstorm/sandstorm-test-app-id`,
+rewrites a temporary package definition inside the VM, and returns structured
+package metadata. spktool asks VM-side `capnp` to parse the checked-in package
+definition, mutates the parsed JSON on the host, then asks VM-side `capnp` to
+write a temporary test package definition. In GitHub Actions, prefer JSON
+output:
+
+```sh
+spktool --output json pack --dev --set-version "$GITHUB_SHA" build/app.spk
+```
 
 To override the Sandstorm download mirror for one machine, add this to
 `.sandstorm/box.local.toml`:
@@ -108,6 +125,12 @@ make
 ```
 
 That writes the binary to `./bin/spktool`.
+
+Run the unit test suite with:
+
+```sh
+make test
+```
 
 Run it directly from the repo without creating a binary first:
 
