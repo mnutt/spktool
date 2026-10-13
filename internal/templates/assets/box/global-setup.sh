@@ -18,7 +18,7 @@ if [[ -f "${RUNTIME_ENV}" ]]; then
     HAS_RUNTIME_ENV=true
 fi
 
-SANDSTORM_INSTALL_SCRIPT_URL="https://install.sandstorm.io/"
+SANDSTORM_INSTALL_SCRIPT_URL="https://install.sandstorm.org/"
 SANDSTORM_PACKAGE_URL="${SANDSTORM_DOWNLOAD_URL:-}"
 
 # Grub updates don't silent install well
@@ -72,9 +72,9 @@ if [[ -n "${SANDSTORM_PACKAGE_URL}" ]]; then
     echo "========================================"
     echo
 else
-    SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.io/dev?from=0&type=install")
+    SANDSTORM_CURRENT_VERSION=$(curl $CURL_OPTS -f "https://install.sandstorm.org/dev?from=0&type=install")
     SANDSTORM_PACKAGE="sandstorm-$SANDSTORM_CURRENT_VERSION.tar.xz"
-    SANDSTORM_PACKAGE_URL="https://dl.sandstorm.io/$SANDSTORM_PACKAGE"
+    SANDSTORM_PACKAGE_URL="https://dl.sandstorm.org/$SANDSTORM_PACKAGE"
 fi
 
 if [[ ! -f /host-dot-sandstorm/caches/$SANDSTORM_PACKAGE ]] ; then
