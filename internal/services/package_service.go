@@ -2,13 +2,26 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/providers"
 	"github.com/mnutt/spktool/internal/workflow"
+)
+
+const (
+	keyringGuestPath       = "/host-dot-sandstorm/sandstorm-keyring"
+	devTestAppIDHostPath   = ".sandstorm/sandstorm-test-app-id"
+	devTestPkgdefJSONPath  = "/tmp/spktool-dev-test-pkgdef.json"
+	devTestPkgdefPath      = "/tmp/spktool-dev-test-pkgdef.capnp"
+	defaultPkgdefGuestPath = "/opt/app/.sandstorm/sandstorm-pkgdef.capnp"
+	capnpGuestImportPath   = "/opt/sandstorm/latest/usr/include"
+	capnpPackageSchemaPath = "/opt/sandstorm/latest/usr/include/sandstorm/package.capnp"
 )
 
 func (s *PackageService) Init(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -83,13 +96,28 @@ func (s *PackageService) Dev(ctx context.Context, workDir string, providerOverri
 	return projectState, nil
 }
 
-func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+func (s *PackageService) Build(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
+	if err != nil {
+		return nil, err
+	}
+	project := s.deps.projectContext(workDir, projectState, resolved)
+	if err := plugin.ExecStream(ctx, project, []string{"cd", "/opt/app", "&&", "sg", "sandstorm", "-c", "/opt/app/.sandstorm/build.sh"}); err != nil {
+		return nil, err
+	}
+	return projectState, nil
+}
+
+func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, opts PackOptions, providerOverride domain.ProviderName) (*PackResult, error) {
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
 	}
 	if outputPath == "" {
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Pack", Message: "output path is required"}
+	}
+	if opts.SetVersion != "" && !opts.Dev {
+		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Pack", Message: "--set-version may only be used with --dev"}
 	}
 
 	project := s.deps.projectContext(workDir, projectState, resolved)
@@ -99,43 +127,156 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, p
 		guestArtifact = "/home/vagrant/sandstorm-package.spk"
 	}
 
-	err = workflow.Run(ctx, "pack", []workflow.Step{
-		{
-			Name: "remove-stale-host-artifact",
-			Do: func(context.Context) error {
-				if err := os.Remove(hostArtifact); err != nil && !os.IsNotExist(err) {
-					return domain.Wrap(domain.ErrExternal, "services.Pack", "remove stale host artifact", err)
-				}
-				return nil
-			},
-		},
-		{
-			Name: "build-package-in-guest",
-			Do: func(context.Context) error {
-				command := []string{
-					"cd", "/opt/app/.sandstorm",
-					"&&", "spk", "pack",
-					"--keyring=/host-dot-sandstorm/sandstorm-keyring",
-					"--pkg-def=/opt/app/.sandstorm/sandstorm-pkgdef.capnp:pkgdef",
-					guestArtifact,
-					"&&", "spk", "verify", "--details", guestArtifact,
-					"&&", "mv", guestArtifact, "/opt/app/sandstorm-package.spk",
-				}
-				_, err := plugin.Exec(ctx, project, command)
-				return err
-			},
-		},
-		{
-			Name: "move-package-to-output",
-			Do: func(context.Context) error {
-				return moveFile(hostArtifact, outputPath)
-			},
-		},
-	})
+	prepared, err := s.preparePackPkgdef(ctx, workDir, project, plugin, opts)
 	if err != nil {
 		return nil, err
 	}
-	return projectState, nil
+	defer func() {
+		_ = prepared.cleanup()
+	}()
+
+	if err := os.Remove(hostArtifact); err != nil && !os.IsNotExist(err) {
+		return nil, domain.Wrap(domain.ErrExternal, "services.Pack", "remove stale host artifact", err)
+	}
+
+	if err := s.buildPackageInGuest(ctx, project, plugin, prepared.pkgdefRef, guestArtifact); err != nil {
+		return nil, err
+	}
+	if err := moveFile(hostArtifact, outputPath); err != nil {
+		return nil, err
+	}
+	return &PackResult{
+		OutputPath: outputPath,
+		PackageID:  prepared.packageID,
+		AppID:      prepared.appID,
+		Dev:        opts.Dev,
+		SetVersion: opts.SetVersion,
+	}, nil
+}
+
+type preparedPkgdef struct {
+	pkgdefRef string
+	appID     string
+	packageID string
+	cleanup   func() error
+}
+
+func (s *PackageService) preparePackPkgdef(ctx context.Context, workDir string, project providers.ProjectContext, plugin providers.RuntimeProvider, opts PackOptions) (preparedPkgdef, error) {
+	prepared := preparedPkgdef{
+		pkgdefRef: defaultPkgdefGuestPath + ":pkgdef",
+		cleanup:   func() error { return nil },
+	}
+	pkgdefJSON, err := s.guestPkgdefJSON(ctx, project, plugin, defaultPkgdefGuestPath)
+	if err != nil {
+		return preparedPkgdef{}, err
+	}
+	if !opts.Dev {
+		packageID, err := packageIDFromPkgdefJSON(pkgdefJSON)
+		if err != nil {
+			return preparedPkgdef{}, err
+		}
+		prepared.packageID = packageID
+		return prepared, nil
+	}
+	appID, err := s.ensureDevTestAppID(ctx, workDir, project, plugin)
+	if err != nil {
+		return preparedPkgdef{}, err
+	}
+	body, err := devPkgdefJSON(pkgdefJSON, appID, opts.SetVersion)
+	if err != nil {
+		return preparedPkgdef{}, err
+	}
+	if err := plugin.WriteFile(ctx, project, providers.RenderedFile{
+		Path: devTestPkgdefJSONPath,
+		Body: body,
+		Mode: 0o644,
+	}); err != nil {
+		return preparedPkgdef{}, err
+	}
+	if err := s.writeGuestPkgdefFromJSON(ctx, project, plugin, devTestPkgdefJSONPath, devTestPkgdefPath); err != nil {
+		_, _ = plugin.Exec(ctx, project, []string{"rm", "-f", devTestPkgdefJSONPath})
+		return preparedPkgdef{}, err
+	}
+	return preparedPkgdef{
+		pkgdefRef: devTestPkgdefPath + ":pkgdef",
+		appID:     appID,
+		packageID: appID,
+		cleanup: func() error {
+			_, err := plugin.Exec(ctx, project, []string{"rm", "-f", devTestPkgdefJSONPath, devTestPkgdefPath})
+			return err
+		},
+	}, nil
+}
+
+func (s *PackageService) guestPkgdefJSON(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefPath string) ([]byte, error) {
+	result, err := plugin.Exec(ctx, project, []string{"capnp", "-I", capnpGuestImportPath, "eval", "-ojson", "--short", pkgdefPath, "pkgdef"})
+	if err != nil {
+		return nil, domain.Wrap(domain.ErrExternal, "services.guestPkgdefJSON", "`capnp` is required in the VM; rerun `spktool vm provision` to install capnproto", err)
+	}
+	return []byte(result.Stdout), nil
+}
+
+func (s *PackageService) writeGuestPkgdefFromJSON(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, jsonPath, outputPath string) error {
+	script := fmt.Sprintf(`set -euo pipefail
+converted="$(capnp -I %s convert --short json:text %s PackageDefinition < %s)"
+file_id="$(capnp id | sed -E 's/^@?([^;]+);?$/\1/')"
+{
+  printf '@%%s;\n\n' "$file_id"
+  printf 'using Spk = import "/sandstorm/package.capnp";\n\n'
+  printf 'const pkgdef :Spk.PackageDefinition = %%s;\n' "$converted"
+} > %s`, capnpGuestImportPath, capnpPackageSchemaPath, jsonPath, outputPath)
+	_, err := plugin.Exec(ctx, project, []string{"bash", "-lc", script})
+	if err != nil {
+		return domain.Wrap(domain.ErrExternal, "services.writeGuestPkgdefFromJSON", "write temporary dev package definition", err)
+	}
+	return nil
+}
+
+func (s *PackageService) buildPackageInGuest(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefRef, guestArtifact string) error {
+	command := []string{
+		"cd", "/opt/app/.sandstorm",
+		"&&", "spk", "pack",
+		"--keyring=" + keyringGuestPath,
+		"--pkg-def=" + pkgdefRef,
+		guestArtifact,
+		"&&", "spk", "verify", "--details", guestArtifact,
+		"&&", "mv", guestArtifact, "/opt/app/sandstorm-package.spk",
+	}
+	_, err := plugin.Exec(ctx, project, command)
+	return err
+}
+
+func (s *PackageService) ensureDevTestAppID(ctx context.Context, workDir string, project providers.ProjectContext, plugin providers.RuntimeProvider) (string, error) {
+	path := filepath.Join(workDir, devTestAppIDHostPath)
+	data, err := os.ReadFile(path)
+	if err == nil {
+		appID := strings.TrimSpace(string(data))
+		if appID != "" {
+			return appID, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "read dev test app id", err)
+	}
+
+	result, err := plugin.Exec(ctx, project, []string{"spk", "keygen", "--keyring=" + keyringGuestPath})
+	if err != nil {
+		return "", err
+	}
+	lines := nonEmptyLines(result.Stdout)
+	if len(lines) != 1 || !validAppID(lines[0]) {
+		return "", &domain.Error{
+			Code:    domain.ErrExternal,
+			Op:      "services.Pack",
+			Message: fmt.Sprintf("unexpected `spk keygen` output while creating dev test app id: %q", result.Stdout),
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "create .sandstorm directory for dev test app id", err)
+	}
+	if err := os.WriteFile(path, []byte(lines[0]+"\n"), 0o644); err != nil {
+		return "", domain.Wrap(domain.ErrExternal, "services.Pack", "write dev test app id", err)
+	}
+	return lines[0], nil
 }
 
 func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -258,6 +399,132 @@ func (s *PackageService) devCommand(provider domain.ProviderName, wrapperPath st
 	default:
 		return []string{"bash", wrapperPath, "--", "bash", "-lc", buildCmd + " && " + devCmd}
 	}
+}
+
+var (
+	appIDPattern  = regexp.MustCompile(`^[a-z0-9]{20,}$`)
+	signingFields = map[string]struct{}{
+		"pgpSignature":            {},
+		"pgpKeyring":              {},
+		"authorPgpSignature":      {},
+		"authorPgpKeyring":        {},
+		"authorPgpKeyFingerprint": {},
+	}
+)
+
+func packageIDFromPkgdefJSON(input []byte) (string, error) {
+	var pkgdef map[string]any
+	if err := json.Unmarshal(input, &pkgdef); err != nil {
+		return "", domain.Wrap(domain.ErrInvalidArgument, "services.packageIDFromPkgdefJSON", "parse package definition JSON", err)
+	}
+	id, ok := pkgdef["id"].(string)
+	if !ok || !validAppID(id) {
+		return "", &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.packageIDFromPkgdefJSON", Message: "package definition JSON is missing a valid id"}
+	}
+	return id, nil
+}
+
+func devPkgdefJSON(input []byte, appID, setVersion string) ([]byte, error) {
+	if !validAppID(appID) {
+		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.devPkgdefJSON", Message: "invalid app id"}
+	}
+	var pkgdef map[string]any
+	if err := json.Unmarshal(input, &pkgdef); err != nil {
+		return nil, domain.Wrap(domain.ErrInvalidArgument, "services.devPkgdefJSON", "parse package definition JSON", err)
+	}
+	pkgdef["id"] = appID
+	if err := appendJSONDefaultText(pkgdef, " Test", "manifest", "appTitle"); err != nil {
+		return nil, err
+	}
+	if setVersion != "" {
+		if err := setJSONDefaultText(pkgdef, setVersion, "manifest", "appMarketingVersion"); err != nil {
+			return nil, err
+		}
+	}
+	stripSigningJSON(pkgdef)
+	output, err := json.Marshal(pkgdef)
+	if err != nil {
+		return nil, domain.Wrap(domain.ErrExternal, "services.devPkgdefJSON", "encode package definition JSON", err)
+	}
+	return output, nil
+}
+
+func appendJSONDefaultText(root map[string]any, suffix string, path ...string) error {
+	text, current, err := jsonDefaultTextAt(root, "services.appendJSONDefaultText", path...)
+	if err != nil {
+		return err
+	}
+	if !strings.HasSuffix(text, suffix) {
+		current["defaultText"] = text + suffix
+	}
+	return nil
+}
+
+func setJSONDefaultText(root map[string]any, value string, path ...string) error {
+	_, current, err := jsonDefaultTextAt(root, "services.setJSONDefaultText", path...)
+	if err != nil {
+		return err
+	}
+	current["defaultText"] = value
+	return nil
+}
+
+func jsonDefaultTextAt(root map[string]any, op string, path ...string) (string, map[string]any, error) {
+	current, err := jsonObjectAt(root, path...)
+	if err != nil {
+		return "", nil, err
+	}
+	text, ok := current["defaultText"].(string)
+	if !ok {
+		fullPath := append(append([]string(nil), path...), "defaultText")
+		return "", nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: op, Message: strings.Join(fullPath, ".") + " is missing or not a string"}
+	}
+	return text, current, nil
+}
+
+func jsonObjectAt(root map[string]any, path ...string) (map[string]any, error) {
+	current := root
+	for _, key := range path {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.jsonObjectAt", Message: strings.Join(path, ".") + " is missing or not an object"}
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func stripSigningJSON(value any) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, item := range current {
+			if _, ok := signingFields[key]; ok {
+				delete(current, key)
+				continue
+			}
+			stripSigningJSON(item)
+		}
+	case []any:
+		for _, item := range current {
+			stripSigningJSON(item)
+		}
+	}
+}
+
+func nonEmptyLines(output string) []string {
+	lines := strings.Split(output, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+func validAppID(id string) bool {
+	return appIDPattern.MatchString(id)
 }
 
 func devShellQuote(s string) string {

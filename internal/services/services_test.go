@@ -30,6 +30,7 @@ type fakePlugin struct {
 	detectInstance  string
 	bootstrapFiles  []providers.RenderedFile
 	execResult      runner.Result
+	execResults     []runner.Result
 	execErr         error
 	upErr           error
 	haltErr         error
@@ -47,6 +48,8 @@ type fakePlugin struct {
 	statusHook      func(providers.ProjectContext) (providers.Status, error)
 	lastExecCtx     providers.ProjectContext
 	lastExecCmd     []string
+	execCommands    [][]string
+	lastStreamCmd   []string
 	lastActionCtx   providers.ProjectContext
 	lastSSHArgs     []string
 	lastWriteFiles  []providers.RenderedFile
@@ -99,12 +102,21 @@ func (p *fakePlugin) SSH(_ context.Context, project providers.ProjectContext, ar
 func (p *fakePlugin) Exec(_ context.Context, project providers.ProjectContext, command []string) (runner.Result, error) {
 	p.lastExecCtx = project
 	p.lastExecCmd = append([]string(nil), command...)
+	p.execCommands = append(p.execCommands, append([]string(nil), command...))
 	if p.execHook != nil {
 		if err := p.execHook(project, command); err != nil {
 			return runner.Result{}, err
 		}
 	}
+	if index := len(p.execCommands) - 1; index < len(p.execResults) {
+		return p.execResults[index], p.execErr
+	}
 	return p.execResult, p.execErr
+}
+func (p *fakePlugin) ExecStream(_ context.Context, project providers.ProjectContext, command []string) error {
+	p.lastExecCtx = project
+	p.lastStreamCmd = append([]string(nil), command...)
+	return p.execErr
 }
 func (p *fakePlugin) ExecInteractive(_ context.Context, project providers.ProjectContext, command []string) error {
 	p.lastExecCtx = project
@@ -146,6 +158,57 @@ func (p *fakePlugin) Status(_ context.Context, project providers.ProjectContext)
 		return p.statusResult, p.statusErr
 	}
 	return providers.Status{Provider: p.name, InstanceName: p.detectInstance, State: "reported"}, nil
+}
+
+func flattenCommands(commands [][]string) []string {
+	flattened := make([]string, 0)
+	for _, command := range commands {
+		flattened = append(flattened, command...)
+	}
+	return flattened
+}
+
+func writeTestPkgdef(t *testing.T, workDir, appID string) {
+	t.Helper()
+	body := `@0xabcdef;
+
+using Spk = import "/sandstorm/package.capnp";
+
+const pkgdef :Spk.PackageDefinition = (
+  id = "` + appID + `",
+  manifest = (
+    appTitle = (defaultText = "Test App"),
+    appMarketingVersion = (defaultText = "1.0.0"),
+    metadata = (
+      author = (
+        pgpSignature = embed "pgp-signature",
+        upstreamAuthor = "Upstream",
+      ),
+      pgpKeyring = embed "pgp-keyring",
+    ),
+  ),
+);
+`
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "sandstorm-pkgdef.capnp"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testPkgdefJSON(appID string) string {
+	return `{
+  "id": "` + appID + `",
+  "manifest": {
+    "appTitle": {"defaultText": "Test App"},
+    "appMarketingVersion": {"defaultText": "1.0.0"},
+    "metadata": {
+      "author": {
+        "pgpSignature": {"embed": "pgp-signature"},
+        "upstreamAuthor": "Upstream"
+      },
+      "pgpKeyring": {"embed": "pgp-keyring"}
+    }
+  }
+}`
 }
 
 type testServices struct {
@@ -279,7 +342,13 @@ func TestSetupVMWritesProjectFilesAndState(t *testing.T) {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
 	}
-
+	globalSetup, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "global-setup.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(globalSetup), "capnproto") {
+		t.Fatalf("expected global setup to install capnproto, got %q", globalSetup)
+	}
 	stackData, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", config.ProjectFile))
 	if err != nil {
 		t.Fatal(err)
@@ -1246,6 +1315,38 @@ func TestDevUploadsHelpersAndStartsInteractiveSession(t *testing.T) {
 	}
 }
 
+func TestBuildRunsProjectBuildScriptInsideGuest(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := svc.Build(context.Background(), workDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Provider != domain.ProviderLima || state.Stack != "lemp" {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+	if len(plugin.lastExecCmd) != 0 {
+		t.Fatalf("expected build to use streaming exec, got captured command: %q", strings.Join(plugin.lastExecCmd, " "))
+	}
+	gotCmd := strings.Join(plugin.lastStreamCmd, " ")
+	if !strings.Contains(gotCmd, "cd /opt/app") ||
+		!strings.Contains(gotCmd, "sg sandstorm -c /opt/app/.sandstorm/build.sh") {
+		t.Fatalf("unexpected build command: %q", gotCmd)
+	}
+}
+
 func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
 	t.Parallel()
 
@@ -1633,13 +1734,21 @@ func TestPackIncludesGuestCommandStderrInWorkflowError(t *testing.T) {
 	plugin := &fakePlugin{
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
-		execErr: &runner.CommandError{
-			Result: runner.Result{
-				Command:  "limactl shell --workdir /opt/app sandstorm-app-1234 bash -lc ...",
-				ExitCode: 1,
-				Stderr:   "bad alwaysInclude paths\nCap'n Proto parse error",
-			},
-			Err: &exec.ExitError{},
+		execResults: []runner.Result{
+			{Stdout: testPkgdefJSON("hostabcdefghijklmnop") + "\n"},
+		},
+		execHook: func(_ providers.ProjectContext, command []string) error {
+			if strings.Contains(strings.Join(command, " "), "spk pack") {
+				return &runner.CommandError{
+					Result: runner.Result{
+						Command:  "limactl shell --workdir /opt/app sandstorm-app-1234 bash -lc ...",
+						ExitCode: 1,
+						Stderr:   "bad alwaysInclude paths\nCap'n Proto parse error",
+					},
+					Err: &exec.ExitError{},
+				}
+			}
+			return nil
 		},
 	}
 	svc := newService(t, plugin, home)
@@ -1648,7 +1757,7 @@ func TestPackIncludesGuestCommandStderrInWorkflowError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := svc.Pack(context.Background(), workDir, filepath.Join(workDir, "out.spk"), "")
+	_, err := svc.Pack(context.Background(), workDir, filepath.Join(workDir, "out.spk"), services.PackOptions{}, "")
 	if err == nil {
 		t.Fatal("expected pack error")
 	}
@@ -1728,7 +1837,10 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	plugin := &fakePlugin{
 		name:           domain.ProviderLima,
 		detectInstance: "sandstorm-app-1234",
-		execResult:     runner.Result{},
+		execResults: []runner.Result{
+			{Stdout: testPkgdefJSON("hostabcdefghijklmnop") + "\n"},
+			{},
+		},
 		execHook: func(project providers.ProjectContext, _ []string) error {
 			return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
 		},
@@ -1738,12 +1850,18 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
 		t.Fatal(err)
 	}
+	hostPackageID := "hostabcdefghijklmnop"
+	writeTestPkgdef(t, workDir, hostPackageID)
 
-	if _, err := svc.Pack(context.Background(), workDir, outputPath, ""); err != nil {
+	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{}, "")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if result.OutputPath != outputPath || result.PackageID != hostPackageID || result.Dev {
+		t.Fatalf("unexpected pack result: %+v", result)
+	}
 
-	gotCmd := strings.Join(plugin.lastExecCmd, " ")
+	gotCmd := strings.Join(flattenCommands(plugin.execCommands), " ")
 	if !strings.Contains(gotCmd, "cd /opt/app/.sandstorm") ||
 		!strings.Contains(gotCmd, "spk pack") ||
 		!strings.Contains(gotCmd, "spk verify --details /tmp/sandstorm-package.spk") {
@@ -1755,6 +1873,115 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 	}
 	if string(data) != "pkg" {
 		t.Fatalf("unexpected output contents: %q", string(data))
+	}
+}
+
+func TestPackRequiresPackageIDInHostPkgdef(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	outputPath := filepath.Join(t.TempDir(), "app.spk")
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		execResults: []runner.Result{
+			{Stdout: `{"noId":true}` + "\n"},
+		},
+		execHook: func(project providers.ProjectContext, _ []string) error {
+			return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".sandstorm", "sandstorm-pkgdef.capnp"), []byte("const pkgdef = (noId = true);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{}, "")
+	if err == nil {
+		t.Fatalf("expected missing package id error, got result %+v", result)
+	}
+	if !strings.Contains(err.Error(), "missing a valid id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPackDevGeneratesTestAppIDAndUsesTemporaryPkgdef(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	home := t.TempDir()
+	outputPath := filepath.Join(t.TempDir(), "app.spk")
+	testAppID := "abcdefghijklmnopqrst"
+	plugin := &fakePlugin{
+		name:           domain.ProviderLima,
+		detectInstance: "sandstorm-app-1234",
+		execResults: []runner.Result{
+			{Stdout: testPkgdefJSON("originalabcdefghijkl") + "\n"},
+			{Stdout: testAppID + "\n"},
+			{},
+			{},
+		},
+		execHook: func(project providers.ProjectContext, command []string) error {
+			if strings.Contains(strings.Join(command, " "), "spk pack") {
+				return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
+			}
+			return nil
+		},
+	}
+	svc := newService(t, plugin, home)
+
+	if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+		t.Fatal(err)
+	}
+	writeTestPkgdef(t, workDir, "originalabcdefghijkl")
+
+	result, err := svc.Pack(context.Background(), workDir, outputPath, services.PackOptions{Dev: true, SetVersion: "sha123"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Dev || result.SetVersion != "sha123" || result.AppID != testAppID || result.PackageID != testAppID {
+		t.Fatalf("unexpected dev pack result: %+v", result)
+	}
+	data, err := os.ReadFile(filepath.Join(workDir, ".sandstorm", "sandstorm-test-app-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != testAppID {
+		t.Fatalf("unexpected persisted test app id: %q", data)
+	}
+	if len(plugin.lastWriteFiles) == 0 || plugin.lastWriteFiles[0].Path != "/tmp/spktool-dev-test-pkgdef.json" {
+		t.Fatalf("expected dev pkgdef JSON upload, got %#v", plugin.lastWriteFiles)
+	}
+	var uploadedPkgdef map[string]any
+	if err := json.Unmarshal(plugin.lastWriteFiles[0].Body, &uploadedPkgdef); err != nil {
+		t.Fatal(err)
+	}
+	manifest := uploadedPkgdef["manifest"].(map[string]any)
+	if uploadedPkgdef["id"] != testAppID ||
+		manifest["appTitle"].(map[string]any)["defaultText"] != "Test App Test" ||
+		manifest["appMarketingVersion"].(map[string]any)["defaultText"] != "sha123" {
+		t.Fatalf("unexpected dev pkgdef JSON: %#v", uploadedPkgdef)
+	}
+	metadata := manifest["metadata"].(map[string]any)
+	author := metadata["author"].(map[string]any)
+	if _, ok := author["pgpSignature"]; ok {
+		t.Fatalf("expected author pgpSignature to be stripped: %#v", uploadedPkgdef)
+	}
+	if _, ok := metadata["pgpKeyring"]; ok {
+		t.Fatalf("expected pgpKeyring to be stripped: %#v", uploadedPkgdef)
+	}
+	commands := strings.Join(flattenCommands(plugin.execCommands), " ")
+	if !strings.Contains(commands, "capnp -I /opt/sandstorm/latest/usr/include eval -ojson --short /opt/app/.sandstorm/sandstorm-pkgdef.capnp pkgdef") ||
+		!strings.Contains(commands, "capnp -I /opt/sandstorm/latest/usr/include convert --short json:text") ||
+		!strings.Contains(commands, "capnp id | sed -E") ||
+		!strings.Contains(commands, "--pkg-def=/tmp/spktool-dev-test-pkgdef.capnp:pkgdef") ||
+		!strings.Contains(commands, "rm -f /tmp/spktool-dev-test-pkgdef.json /tmp/spktool-dev-test-pkgdef.capnp") {
+		t.Fatalf("expected dev pack commands, got %q", commands)
 	}
 }
 

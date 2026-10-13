@@ -17,11 +17,12 @@ type fakeApp struct {
 	setupVM     func(context.Context, string, domain.ProviderName, string, bool) (*domain.ProjectState, error)
 	renderCfg   func(context.Context, string, domain.ProviderName) (*services.ConfigRender, error)
 	dev         func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	build       func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	add         func(context.Context, string, string) (*domain.ProjectState, error)
 	listUtils   func(context.Context) (*services.UtilityCatalog, error)
 	describe    func(context.Context, string) (*services.UtilityDetails, error)
 	install     func(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
-	pack        func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	pack        func(context.Context, string, string, services.PackOptions, domain.ProviderName) (*services.PackResult, error)
 	verify      func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	publish     func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
 	keygen      func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
@@ -52,6 +53,9 @@ func (a *fakeApp) Init(context.Context, string, domain.ProviderName) (*domain.Pr
 func (a *fakeApp) Dev(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.dev(ctx, workDir, provider)
 }
+func (a *fakeApp) Build(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+	return a.build(ctx, workDir, provider)
+}
 func (a *fakeApp) Add(ctx context.Context, workDir, util string) (*domain.ProjectState, error) {
 	return a.add(ctx, workDir, util)
 }
@@ -64,8 +68,8 @@ func (a *fakeApp) DescribeUtility(ctx context.Context, name string) (*services.U
 func (a *fakeApp) InstallSkills(ctx context.Context, workDir string, req services.InstallSkillsRequest) (*services.InstallSkillsResult, error) {
 	return a.install(ctx, workDir, req)
 }
-func (a *fakeApp) Pack(ctx context.Context, workDir, output string, provider domain.ProviderName) (*domain.ProjectState, error) {
-	return a.pack(ctx, workDir, output, provider)
+func (a *fakeApp) Pack(ctx context.Context, workDir, output string, opts services.PackOptions, provider domain.ProviderName) (*services.PackResult, error) {
+	return a.pack(ctx, workDir, output, opts, provider)
 }
 func (a *fakeApp) Verify(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.verify(ctx, workDir, spkPath, provider)
@@ -883,17 +887,57 @@ func TestRunDevDispatchesToApp(t *testing.T) {
 	}
 }
 
+func TestRunBuildDispatchesToApp(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotProvider domain.ProviderName
+	app := &fakeApp{
+		stacks: []string{"lemp"},
+		build: func(_ context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
+			if workDir != "/workspace/app" {
+				t.Fatalf("unexpected workdir: %q", workDir)
+			}
+			gotProvider = provider
+			return &domain.ProjectState{Provider: provider, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "--provider", "lima", "build"},
+		DefaultProvider: domain.ProviderVagrant,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider != domain.ProviderLima {
+		t.Fatalf("expected provider override, got %q", gotProvider)
+	}
+	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
 func TestRunPackDispatchesToApp(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		pack: func(_ context.Context, workDir, output string, _ domain.ProviderName) (*domain.ProjectState, error) {
+		pack: func(_ context.Context, workDir, output string, opts services.PackOptions, _ domain.ProviderName) (*services.PackResult, error) {
 			if workDir != "/workspace/app" || output != "out.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, output)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
+			if opts.Dev || opts.SetVersion != "" {
+				t.Fatalf("unexpected pack opts: %+v", opts)
+			}
+			return &services.PackResult{
+				OutputPath: "out.spk",
+				PackageID:  "pkg123",
+			}, nil
 		},
 	}
 
@@ -907,8 +951,60 @@ func TestRunPackDispatchesToApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); got != "provider=lima stack=lemp vm=sandstorm-app\n" {
+	if got := stdout.String(); got != "packageId=pkg123\npackage produced at out.spk\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunPackParsesDevFlags(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var gotOpts services.PackOptions
+	app := &fakeApp{
+		stacks: []string{"lemp"},
+		pack: func(_ context.Context, workDir, output string, opts services.PackOptions, provider domain.ProviderName) (*services.PackResult, error) {
+			if workDir != "/workspace/app" || output != "out.spk" || provider != domain.ProviderLima {
+				t.Fatalf("unexpected args: %q %q %q", workDir, output, provider)
+			}
+			gotOpts = opts
+			return &services.PackResult{OutputPath: output, PackageID: "pkg123", Dev: opts.Dev, SetVersion: opts.SetVersion}, nil
+		},
+	}
+
+	err := Run(context.Background(), appSet(app), Config{
+		Program:         "spktool",
+		Args:            []string{"--work-directory", "/workspace/app", "pack", "--dev", "--set-version", "abc123", "out.spk"},
+		DefaultProvider: domain.ProviderLima,
+		Stdout:          &stdout,
+		Stderr:          &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotOpts.Dev || gotOpts.SetVersion != "abc123" {
+		t.Fatalf("unexpected pack opts: %+v", gotOpts)
+	}
+	if got := stdout.String(); !strings.Contains(got, "packageId=pkg123") {
+		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunPackRejectsSetVersionWithoutDev(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := Run(context.Background(), appSet(&fakeApp{stacks: []string{"lemp"}}), Config{
+		Program: "spktool",
+		Args:    []string{"pack", "--set-version", "abc123", "out.spk"},
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "--set-version may only be used with --dev") {
+		t.Fatalf("expected validation output, got %q", got)
 	}
 }
 
@@ -925,7 +1021,7 @@ func TestRunPackMissingOutputShowsUsageInTextMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: pack <output.spk>")) {
+	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("usage: pack [--dev] [--set-version <version>] <output.spk>")) {
 		t.Fatalf("expected pack usage output, got %q", got)
 	}
 }
