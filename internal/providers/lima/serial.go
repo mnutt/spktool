@@ -10,11 +10,10 @@ import (
 )
 
 func startSerialTail(instance string) func() {
-	homeDir, err := os.UserHomeDir()
+	instanceDir, err := limaInstanceDir(instance)
 	if err != nil {
 		return func() {}
 	}
-	instanceDir := filepath.Join(homeDir, ".lima", instance)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)

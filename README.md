@@ -161,7 +161,10 @@ Those aliases change the default provider based on `argv[0]`, so:
 - On macOS hosts, `spktool` renders `mountType: 9p` for Lima.
 - On non-macOS hosts, `spktool` renders `mountType: virtiofs` when `virtiofsd`
   is available and falls back to `9p` otherwise.
-- `--verbose` enables Lima serial boot tailing to help diagnose startup issues.
+- `--verbose` enables Lima serial boot tailing and, on Lima 2.1 or newer,
+  lifecycle and port-forwarding events during VM startup. Availability is
+  detected with `limactl watch --help`; older versions retain serial diagnostics.
+  Both diagnostics respect `LIMA_HOME`.
 - The generated `runtime.env` is consumed by `global-setup.sh` during
   provisioning and drives the Sandstorm bind address, external port, base URL,
   and wildcard host.

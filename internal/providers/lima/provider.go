@@ -106,6 +106,10 @@ func (p *Provider) Up(ctx context.Context, project providers.ProjectContext) err
 		stopTail = startSerialTail(instance)
 	}
 	defer stopTail()
+	if project.Verbose {
+		stopWatch := startWatch(ctx, instance, limaInstanceExists(status.State), os.Stdout)
+		defer stopWatch()
+	}
 	args := []string{"start", "--name", instance, "--tty=false", "--progress", filepath.Join(project.WorkDir, ".sandstorm", ".generated", "lima.yaml")}
 	if limaInstanceExists(status.State) {
 		args = []string{"start", "--tty=false", instance}
