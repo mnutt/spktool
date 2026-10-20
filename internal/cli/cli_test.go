@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,7 +31,7 @@ type fakeApp struct {
 	getkey      func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
 	enterGrain  func(context.Context, string, domain.ProviderName, bool) (*domain.ProjectState, error)
 	vmCreate    func(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
-	vmUp        func(context.Context, string, domain.ProviderName, int) (*domain.ProjectState, error)
+	vmUp        func(context.Context, string, domain.ProviderName, int, bool) (*domain.ProjectState, error)
 	vmHalt      func(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	vmSSH       func(context.Context, string, []string, domain.ProviderName) (*domain.ProjectState, error)
 	status      func(context.Context, string, domain.ProviderName) (providers.Status, error)
@@ -92,8 +93,8 @@ func (a *fakeApp) EnterGrain(ctx context.Context, workDir string, provider domai
 func (a *fakeApp) VMCreate(ctx context.Context, workDir string, provider domain.ProviderName, downloadURL string) (*domain.ProjectState, error) {
 	return a.vmCreate(ctx, workDir, provider, downloadURL)
 }
-func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName, port int) (*domain.ProjectState, error) {
-	return a.vmUp(ctx, workDir, provider, port)
+func (a *fakeApp) VMUp(ctx context.Context, workDir string, provider domain.ProviderName, port int, allowPortConflict bool) (*domain.ProjectState, error) {
+	return a.vmUp(ctx, workDir, provider, port, allowPortConflict)
 }
 func (a *fakeApp) VMHalt(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
 	return a.vmHalt(ctx, workDir, provider)
@@ -621,7 +622,7 @@ func TestRunVMStartDispatchesToUp(t *testing.T) {
 	var called bool
 	app := &fakeApp{
 		stacks: []string{"node"},
-		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName, port int) (*domain.ProjectState, error) {
+		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName, port int, allowPortConflict bool) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
@@ -661,7 +662,7 @@ func TestRunVMUpParsesPortOverride(t *testing.T) {
 	var gotPort int
 	app := &fakeApp{
 		stacks: []string{"node"},
-		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName, port int) (*domain.ProjectState, error) {
+		vmUp: func(_ context.Context, workDir string, provider domain.ProviderName, port int, allowPortConflict bool) (*domain.ProjectState, error) {
 			if workDir != "/workspace/app" {
 				t.Fatalf("unexpected workdir: %q", workDir)
 			}
@@ -692,6 +693,39 @@ func TestRunVMUpParsesPortOverride(t *testing.T) {
 	}
 	if got := stdout.String(); got != "provider=lima stack=node vm=demo\n" {
 		t.Fatalf("unexpected output: %q", got)
+	}
+}
+
+func TestRunVMAllowPortConflict(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{"up", "start"} {
+		for _, allow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/allow=%t", command, allow), func(t *testing.T) {
+				called := false
+				app := &fakeApp{
+					vmUp: func(_ context.Context, _ string, _ domain.ProviderName, port int, allowPortConflict bool) (*domain.ProjectState, error) {
+						called = true
+						if port != 7000 || allowPortConflict != allow {
+							t.Fatalf("unexpected options: port=%d allowPortConflict=%t", port, allowPortConflict)
+						}
+						return &domain.ProjectState{}, nil
+					},
+				}
+				args := []string{"vm", command, "--port", "7000"}
+				if allow {
+					args = append(args, "--allow-port-conflict")
+				}
+				if err := Run(context.Background(), appSet(app), Config{
+					Program: "spktool", Args: args, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if !called {
+					t.Fatal("expected VMUp call")
+				}
+			})
+		}
 	}
 }
 

@@ -54,7 +54,7 @@ type SkillApp interface {
 
 type VMApp interface {
 	VMCreate(context.Context, string, domain.ProviderName, string) (*domain.ProjectState, error)
-	VMUp(context.Context, string, domain.ProviderName, int) (*domain.ProjectState, error)
+	VMUp(context.Context, string, domain.ProviderName, int, bool) (*domain.ProjectState, error)
 	VMHalt(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMDestroy(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	VMStatus(context.Context, string, domain.ProviderName) (providers.Status, error)
@@ -365,12 +365,15 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		flags.SetOutput(out)
 		flags.Usage = func() {
 			_, _ = fmt.Fprint(out, `Usage of vm up:
+  --allow-port-conflict
+        continue with a warning if the HTTP port is already in use
   --help
     	show help
   --port int
     	persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup
 `)
 		}
+		allowPortConflict := flags.Bool("allow-port-conflict", false, "continue with a warning if the HTTP port is already in use")
 		port := flags.Int("port", 0, "persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup")
 		showHelp := flags.Bool("help", false, "show help")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -379,19 +382,22 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		if *showHelp {
 			return printVMHelp(out)
 		}
-		state, err := app.VMUp(ctx, workDir, providerOverride, *port)
+		state, err := app.VMUp(ctx, workDir, providerOverride, *port, *allowPortConflict)
 		return respond(out, format, state, err)
 	case "start":
 		flags := flag.NewFlagSet("vm start", flag.ContinueOnError)
 		flags.SetOutput(out)
 		flags.Usage = func() {
 			_, _ = fmt.Fprint(out, `Usage of vm start:
+  --allow-port-conflict
+        continue with a warning if the HTTP port is already in use
   --help
     	show help
   --port int
     	persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup
 `)
 		}
+		allowPortConflict := flags.Bool("allow-port-conflict", false, "continue with a warning if the HTTP port is already in use")
 		port := flags.Int("port", 0, "persist a machine-local Sandstorm guest/external port override into .sandstorm/box.local.toml before startup")
 		showHelp := flags.Bool("help", false, "show help")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -400,7 +406,7 @@ func runVM(ctx context.Context, app VMApp, out io.Writer, format, workDir string
 		if *showHelp {
 			return printVMHelp(out)
 		}
-		state, err := app.VMUp(ctx, workDir, providerOverride, *port)
+		state, err := app.VMUp(ctx, workDir, providerOverride, *port, *allowPortConflict)
 		return respond(out, format, state, err)
 	case "halt", "stop":
 		if len(args) > 1 && args[1] == "--help" {
@@ -521,7 +527,7 @@ func printVMHelp(out io.Writer) error {
 
 Usage:
   vm create [--sandstorm-download-url <url>]
-  vm up [--port <port>]
+  vm up [--port <port>] [--allow-port-conflict]
   vm halt
   vm destroy
   vm status

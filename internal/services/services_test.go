@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1393,7 +1394,8 @@ func TestVMLifecycleCommandsPassResolvedProjectContext(t *testing.T) {
 		t.Fatalf("expected vm create to call up and provision once each, got up=%d provision=%d", upCalls, provisionCalls)
 	}
 
-	if _, err := svc.VMUp(context.Background(), workDir, "", 0); err != nil {
+	plugin.statusResult.State = "running"
+	if _, err := svc.VMUp(context.Background(), workDir, "", 0, false); err != nil {
 		t.Fatal(err)
 	}
 	if plugin.lastActionCtx.State == nil || plugin.lastActionCtx.Config == nil {
@@ -1518,6 +1520,14 @@ func TestVMProvisionPersistsSandstormDownloadURLAndRefreshesRuntimeEnv(t *testin
 func TestVMUpDoesNotProvision(t *testing.T) {
 	t.Parallel()
 
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	workDir := t.TempDir()
 	home := t.TempDir()
 	var upCalls int
@@ -1545,11 +1555,159 @@ func TestVMUpDoesNotProvision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.VMUp(context.Background(), workDir, "", 0); err != nil {
+	if _, err := svc.VMUp(context.Background(), workDir, "", port, false); err != nil {
 		t.Fatal(err)
 	}
 	if upCalls != 1 || provisionCalls != 0 {
 		t.Fatalf("expected vm up to call up only, got up=%d provision=%d", upCalls, provisionCalls)
+	}
+}
+
+func TestVMUpChecksHTTPPortBeforeStarting(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name              string
+		state             string
+		override          bool
+		running           bool
+		allowPortConflict bool
+	}{
+		{name: "configured port", state: "unknown"},
+		{name: "port override", state: "unknown", override: true},
+		{name: "stopped VM", state: "stopped"},
+		{name: "running VM owns port", state: "running", running: true},
+		{name: "allowed configured port", state: "unknown", allowPortConflict: true},
+		{name: "allowed override", state: "unknown", override: true, allowPortConflict: true},
+		{name: "allowed stopped VM", state: "stopped", allowPortConflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			port := listener.Addr().(*net.TCPAddr).Port
+			workDir := t.TempDir()
+			upCalls := 0
+			plugin := &fakePlugin{
+				name:         domain.ProviderLima,
+				statusResult: providers.Status{State: tc.state},
+				upHook: func(project providers.ProjectContext) error {
+					upCalls++
+					return nil
+				},
+			}
+			svc := newService(t, plugin, t.TempDir())
+			var warnings bytes.Buffer
+			svc.VMLifecycleService = services.NewServices(
+				slog.New(slog.NewTextHandler(&warnings, nil)),
+				templates.New(), providers.NewRegistry(plugin), keys.NewLocalKeyring(t.TempDir()),
+			).VM
+			if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+				t.Fatal(err)
+			}
+			override := 0
+			if tc.override {
+				override = port
+			} else if err := config.UpdateLocalSandstormPorts(workDir, port); err != nil {
+				t.Fatal(err)
+			}
+			localPath := filepath.Join(workDir, ".sandstorm", config.LocalFile)
+			before, err := os.ReadFile(localPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = svc.VMUp(context.Background(), workDir, "", override, tc.allowPortConflict)
+			if tc.running || tc.allowPortConflict {
+				if err != nil || upCalls != 1 {
+					t.Fatalf("expected startup: calls=%d, error=%v", upCalls, err)
+				}
+				if tc.allowPortConflict && (!strings.Contains(warnings.String(), "already in use") || !strings.Contains(warnings.String(), "--allow-port-conflict")) {
+					t.Fatalf("expected failed port check warning, got %q", warnings.String())
+				}
+				return
+			}
+			var domainErr *domain.Error
+			if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrConflict {
+				t.Fatalf("expected port conflict, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "already in use") || !strings.Contains(err.Error(), "spktool vm up --port <port>") {
+				t.Fatalf("expected actionable port conflict, got %v", err)
+			}
+			if tc.state == "stopped" && !strings.Contains(err.Error(), "spktool vm destroy") {
+				t.Fatalf("expected existing VM instructions, got %v", err)
+			}
+			if upCalls != 0 {
+				t.Fatal("provider started despite port conflict")
+			}
+			after, err := os.ReadFile(localPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("port conflict changed local config")
+			}
+			if err := listener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.VMUp(context.Background(), workDir, "", override, false); err != nil {
+				t.Fatalf("start with released port: %v", err)
+			}
+			if upCalls != 1 {
+				t.Fatalf("expected provider startup after port released, got %d", upCalls)
+			}
+		})
+	}
+}
+
+func TestVMUpAllowPortConflictPreservesOtherErrors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		port      int
+		state     string
+		statusErr error
+		upErr     error
+		code      domain.ErrorCode
+		wantUp    int
+	}{
+		{name: "invalid port", port: 65536, state: "unknown", code: domain.ErrInvalidArgument},
+		{name: "existing VM override", port: 7000, state: "stopped", code: domain.ErrConflict},
+		{name: "status error", statusErr: errors.New("status failed"), code: domain.ErrExternal},
+		{name: "provider error", state: "running", upErr: errors.New("startup failed"), wantUp: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upCalls := 0
+			plugin := &fakePlugin{
+				name:         domain.ProviderLima,
+				statusResult: providers.Status{State: tc.state},
+				statusErr:    tc.statusErr,
+				upHook: func(providers.ProjectContext) error {
+					upCalls++
+					return tc.upErr
+				},
+			}
+			workDir := t.TempDir()
+			svc := newService(t, plugin, t.TempDir())
+			if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+				t.Fatal(err)
+			}
+			_, err := svc.VMUp(context.Background(), workDir, "", tc.port, true)
+			if tc.upErr != nil {
+				if !errors.Is(err, tc.upErr) {
+					t.Fatalf("expected provider error, got %v", err)
+				}
+			} else {
+				var domainErr *domain.Error
+				if !errors.As(err, &domainErr) || domainErr.Code != tc.code {
+					t.Fatalf("expected %s, got %v", tc.code, err)
+				}
+			}
+			if upCalls != tc.wantUp {
+				t.Fatalf("expected %d startup calls, got %d", tc.wantUp, upCalls)
+			}
+		})
 	}
 }
 
@@ -1578,7 +1736,7 @@ func TestVMUpPersistsSandstormPortOverrideAndRefreshesRuntimeEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.VMUp(context.Background(), workDir, "", 7000); err != nil {
+	if _, err := svc.VMUp(context.Background(), workDir, "", 7000, false); err != nil {
 		t.Fatal(err)
 	}
 	if upCalls != 1 {
@@ -1630,7 +1788,7 @@ func TestVMUpWithPortReturnsConflictWhenInstanceAlreadyExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := svc.VMUp(context.Background(), workDir, "", 7000)
+	_, err := svc.VMUp(context.Background(), workDir, "", 7000, false)
 	var domainErr *domain.Error
 	if !errors.As(err, &domainErr) || domainErr.Code != domain.ErrConflict {
 		t.Fatalf("expected conflict error, got %v", err)

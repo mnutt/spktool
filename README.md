@@ -56,6 +56,12 @@ requiring the VM to exist.
 existing VM without reprovisioning, and `spktool vm provision` reruns guest
 setup explicitly.
 
+`spktool vm up` checks whether the HTTP port is available before startup.
+Choose another port with `--port <port>`, or use `--allow-port-conflict` to
+warn about an occupied port and attempt startup anyway. This does not disable
+forwarding or guarantee that the provider can bind the port. The `vm start`
+alias accepts the same options.
+
 `spktool build` runs `.sandstorm/build.sh` inside the VM. This is intended for
 noninteractive build environments that should not need to pipe commands into
 `spktool vm ssh`.
