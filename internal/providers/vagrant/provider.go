@@ -101,11 +101,18 @@ func (p *Provider) ExecInteractive(ctx context.Context, project providers.Projec
 }
 
 func (p *Provider) execSpec(project providers.ProjectContext, command []string, name string) runner.Spec {
+	var redactions []string
+	for _, arg := range command {
+		if strings.HasPrefix(arg, "--webkey=") {
+			redactions = append(redactions, shellJoin([]string{arg}), arg)
+		}
+	}
 	return runner.Spec{
-		Name:    name,
-		Command: "vagrant",
-		Args:    []string{"ssh", "-c", shellJoin(command)},
-		Dir:     filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
+		Redactions: redactions,
+		Name:       name,
+		Command:    "vagrant",
+		Args:       []string{"ssh", "-c", shellJoin(command)},
+		Dir:        filepath.Join(project.WorkDir, ".sandstorm", ".generated"),
 	}
 }
 

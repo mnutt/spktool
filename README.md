@@ -49,6 +49,23 @@ spktool describe-util stay-awake
 spktool add stay-awake
 ```
 
+Publish to an app index with:
+
+```sh
+spktool publish --webkey 'https://index.example#token' app.spk
+spktool publish --webkey 'https://index.example#token' --status app.spk
+```
+
+`publish` also accepts `--embargo` (`-e`) to submit for review without public
+release, `--remove` (`-r`) to withdraw or unpublish, and `--status` (`-s`) to
+check review status. These three actions are mutually exclusive. Place flags
+before the package filename. Omitting `--webkey` uses `spk`'s default index.
+
+`init`, `pack`, `verify`, `publish`, and key commands show captured stdout and
+stderr on their respective terminal streams. With `--output json`, captured
+output is included in the result's `stdout` and `stderr` fields. `build` and
+`dev` stream output directly.
+
 `spktool config render` prints the resolved generated artifacts without
 requiring the VM to exist.
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/mnutt/spktool/internal/domain"
 	"github.com/mnutt/spktool/internal/providers"
+	"github.com/mnutt/spktool/internal/runner"
 	"github.com/mnutt/spktool/internal/workflow"
 )
 
@@ -24,7 +25,7 @@ const (
 	capnpPackageSchemaPath = "/opt/sandstorm/latest/usr/include/sandstorm/package.capnp"
 )
 
-func (s *PackageService) Init(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+func (s *PackageService) Init(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*PackageCommandResult, error) {
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
@@ -39,10 +40,8 @@ func (s *PackageService) Init(ctx context.Context, workDir string, providerOverr
 		command = append(command, strings.Fields(initArgs)...)
 	}
 	command = append(command, "--", "/bin/bash", "/opt/app/.sandstorm/launcher.sh")
-	if _, err := plugin.Exec(ctx, s.deps.projectContext(workDir, projectState, resolved), command); err != nil {
-		return nil, err
-	}
-	return projectState, nil
+	output, err := plugin.Exec(ctx, s.deps.projectContext(workDir, projectState, resolved), command)
+	return &PackageCommandResult{ProjectState: projectState, Stdout: output.Stdout, Stderr: output.Stderr}, err
 }
 
 func (s *PackageService) Dev(ctx context.Context, workDir string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
@@ -139,13 +138,16 @@ func (s *PackageService) Pack(ctx context.Context, workDir, outputPath string, o
 		return nil, domain.Wrap(domain.ErrExternal, "services.Pack", "remove stale host artifact", err)
 	}
 
-	if err := s.buildPackageInGuest(ctx, project, plugin, prepared.pkgdefRef, guestArtifact); err != nil {
-		return nil, err
+	output, err := s.buildPackageInGuest(ctx, project, plugin, prepared.pkgdefRef, guestArtifact)
+	if err != nil {
+		return &PackResult{Stdout: output.Stdout, Stderr: output.Stderr}, err
 	}
 	if err := moveFile(hostArtifact, outputPath); err != nil {
-		return nil, err
+		return &PackResult{Stdout: output.Stdout, Stderr: output.Stderr}, err
 	}
 	return &PackResult{
+		Stdout:     output.Stdout,
+		Stderr:     output.Stderr,
 		OutputPath: outputPath,
 		PackageID:  prepared.packageID,
 		AppID:      prepared.appID,
@@ -232,7 +234,7 @@ file_id="$(capnp id | sed -E 's/^@?([^;]+);?$/\1/')"
 	return nil
 }
 
-func (s *PackageService) buildPackageInGuest(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefRef, guestArtifact string) error {
+func (s *PackageService) buildPackageInGuest(ctx context.Context, project providers.ProjectContext, plugin providers.RuntimeProvider, pkgdefRef, guestArtifact string) (runner.Result, error) {
 	command := []string{
 		"cd", "/opt/app/.sandstorm",
 		"&&", "spk", "pack",
@@ -242,8 +244,7 @@ func (s *PackageService) buildPackageInGuest(ctx context.Context, project provid
 		"&&", "spk", "verify", "--details", guestArtifact,
 		"&&", "mv", guestArtifact, "/opt/app/sandstorm-package.spk",
 	}
-	_, err := plugin.Exec(ctx, project, command)
-	return err
+	return plugin.Exec(ctx, project, command)
 }
 
 func (s *PackageService) ensureDevTestAppID(ctx context.Context, workDir string, project providers.ProjectContext, plugin providers.RuntimeProvider) (string, error) {
@@ -279,7 +280,7 @@ func (s *PackageService) ensureDevTestAppID(ctx context.Context, workDir string,
 	return lines[0], nil
 }
 
-func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*PackageCommandResult, error) {
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
@@ -288,17 +289,48 @@ func (s *PackageService) Verify(ctx context.Context, workDir, spkPath string, pr
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Verify", Message: "spk path is required"}
 	}
 
+	result := &PackageCommandResult{ProjectState: projectState}
 	project := s.deps.projectContext(workDir, projectState, resolved)
 	if err := s.withStagedPackage(ctx, "verify", "services.Verify", workDir, spkPath, func(stagedGuestPath string) error {
-		_, err := plugin.Exec(ctx, project, []string{"spk", "verify", "--details", stagedGuestPath})
+		output, err := plugin.Exec(ctx, project, []string{"spk", "verify", "--details", stagedGuestPath})
+		result.Stdout, result.Stderr = output.Stdout, output.Stderr
 		return err
 	}); err != nil {
-		return nil, err
+		return result, err
 	}
-	return projectState, nil
+	return result, nil
 }
 
-func (s *PackageService) Publish(ctx context.Context, workDir, spkPath string, providerOverride domain.ProviderName) (*domain.ProjectState, error) {
+type PublishOptions struct {
+	Webkey  string
+	Status  bool
+	Embargo bool
+	Remove  bool
+}
+
+func (o PublishOptions) Validate() error {
+	count := 0
+	for _, enabled := range []bool{o.Status, o.Embargo, o.Remove} {
+		if enabled {
+			count++
+		}
+	}
+	if count > 1 {
+		return &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Publish", Message: "--status, --embargo, and --remove are mutually exclusive"}
+	}
+	return nil
+}
+
+type PackageCommandResult struct {
+	*domain.ProjectState
+	Stdout string `json:"stdout,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
+}
+
+func (s *PackageService) Publish(ctx context.Context, workDir, spkPath string, opts PublishOptions, providerOverride domain.ProviderName) (*PackageCommandResult, error) {
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
 	projectState, resolved, plugin, err := s.deps.loadRuntimeProject(ctx, workDir, providerOverride)
 	if err != nil {
 		return nil, err
@@ -307,18 +339,30 @@ func (s *PackageService) Publish(ctx context.Context, workDir, spkPath string, p
 		return nil, &domain.Error{Code: domain.ErrInvalidArgument, Op: "services.Publish", Message: "spk path is required"}
 	}
 
+	result := &PackageCommandResult{ProjectState: projectState}
 	project := s.deps.projectContext(workDir, projectState, resolved)
 	if err := s.withStagedPackage(ctx, "publish", "services.Publish", workDir, spkPath, func(stagedGuestPath string) error {
-		_, err := plugin.Exec(ctx, project, []string{
-			"spk", "publish",
-			"--keyring=/host-dot-sandstorm/sandstorm-keyring",
-			stagedGuestPath,
-		})
+		command := []string{"spk", "publish", "--keyring=/host-dot-sandstorm/sandstorm-keyring"}
+		if opts.Webkey != "" {
+			command = append(command, "--webkey="+opts.Webkey)
+		}
+		if opts.Status {
+			command = append(command, "--status")
+		}
+		if opts.Embargo {
+			command = append(command, "--embargo")
+		}
+		if opts.Remove {
+			command = append(command, "--remove")
+		}
+		command = append(command, stagedGuestPath)
+		output, err := plugin.Exec(ctx, project, command)
+		result.Stdout, result.Stderr = output.Stdout, output.Stderr
 		return err
 	}); err != nil {
-		return nil, err
+		return result, err
 	}
-	return projectState, nil
+	return result, nil
 }
 
 func (s *PackageService) withStagedPackage(ctx context.Context, workflowName, op, workDir, spkPath string, fn func(string) error) error {

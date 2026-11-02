@@ -32,3 +32,18 @@ func TestRunLogsCapturedOutputOnFailure(t *testing.T) {
 		t.Fatalf("expected stdout in log output, got %q", logText)
 	}
 }
+
+func TestRunRedactsRecordedCommandOnFailure(t *testing.T) {
+	var logs bytes.Buffer
+	r := New(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	secret := "https://index.example#secret"
+	result, err := r.Run(context.Background(), Spec{Command: "sh", Args: []string{"-c", "exit 1", "--webkey=" + secret}, Redactions: []string{secret}})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	for _, text := range []string{result.Command, err.Error(), logs.String()} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("webkey leaked: %s", text)
+		}
+	}
+}

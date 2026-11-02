@@ -24,8 +24,8 @@ type fakeApp struct {
 	describe    func(context.Context, string) (*services.UtilityDetails, error)
 	install     func(context.Context, string, services.InstallSkillsRequest) (*services.InstallSkillsResult, error)
 	pack        func(context.Context, string, string, services.PackOptions, domain.ProviderName) (*services.PackResult, error)
-	verify      func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
-	publish     func(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	verify      func(context.Context, string, string, domain.ProviderName) (*services.PackageCommandResult, error)
+	publish     func(context.Context, string, string, services.PublishOptions, domain.ProviderName) (*services.PackageCommandResult, error)
 	keygen      func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	listkeys    func(context.Context, string, []string, domain.ProviderName) (runner.Result, error)
 	getkey      func(context.Context, string, string, domain.ProviderName) (runner.Result, error)
@@ -48,7 +48,7 @@ func (a *fakeApp) UpgradeVM(context.Context, string, domain.ProviderName) (*doma
 func (a *fakeApp) RenderConfig(ctx context.Context, workDir string, provider domain.ProviderName) (*services.ConfigRender, error) {
 	return a.renderCfg(ctx, workDir, provider)
 }
-func (a *fakeApp) Init(context.Context, string, domain.ProviderName) (*domain.ProjectState, error) {
+func (a *fakeApp) Init(context.Context, string, domain.ProviderName) (*services.PackageCommandResult, error) {
 	panic("unexpected call")
 }
 func (a *fakeApp) Dev(ctx context.Context, workDir string, provider domain.ProviderName) (*domain.ProjectState, error) {
@@ -72,11 +72,11 @@ func (a *fakeApp) InstallSkills(ctx context.Context, workDir string, req service
 func (a *fakeApp) Pack(ctx context.Context, workDir, output string, opts services.PackOptions, provider domain.ProviderName) (*services.PackResult, error) {
 	return a.pack(ctx, workDir, output, opts, provider)
 }
-func (a *fakeApp) Verify(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*domain.ProjectState, error) {
+func (a *fakeApp) Verify(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*services.PackageCommandResult, error) {
 	return a.verify(ctx, workDir, spkPath, provider)
 }
-func (a *fakeApp) Publish(ctx context.Context, workDir, spkPath string, provider domain.ProviderName) (*domain.ProjectState, error) {
-	return a.publish(ctx, workDir, spkPath, provider)
+func (a *fakeApp) Publish(ctx context.Context, workDir, spkPath string, opts services.PublishOptions, provider domain.ProviderName) (*services.PackageCommandResult, error) {
+	return a.publish(ctx, workDir, spkPath, opts, provider)
 }
 func (a *fakeApp) Keygen(ctx context.Context, workDir string, args []string, provider domain.ProviderName) (runner.Result, error) {
 	return a.keygen(ctx, workDir, args, provider)
@@ -1066,11 +1066,11 @@ func TestRunVerifyDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		verify: func(_ context.Context, workDir, spkPath string, _ domain.ProviderName) (*domain.ProjectState, error) {
+		verify: func(_ context.Context, workDir, spkPath string, _ domain.ProviderName) (*services.PackageCommandResult, error) {
 			if workDir != "/workspace/app" || spkPath != "input.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, spkPath)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderVagrant, Stack: "lemp", VMInstance: "app"}, nil
+			return &services.PackageCommandResult{ProjectState: &domain.ProjectState{Provider: domain.ProviderVagrant, Stack: "lemp", VMInstance: "app"}}, nil
 		},
 	}
 
@@ -1095,11 +1095,11 @@ func TestRunPublishDispatchesToApp(t *testing.T) {
 	var stdout bytes.Buffer
 	app := &fakeApp{
 		stacks: []string{"lemp"},
-		publish: func(_ context.Context, workDir, spkPath string, _ domain.ProviderName) (*domain.ProjectState, error) {
+		publish: func(_ context.Context, workDir, spkPath string, opts services.PublishOptions, _ domain.ProviderName) (*services.PackageCommandResult, error) {
 			if workDir != "/workspace/app" || spkPath != "input.spk" {
 				t.Fatalf("unexpected args: %q %q", workDir, spkPath)
 			}
-			return &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}, nil
+			return &services.PackageCommandResult{ProjectState: &domain.ProjectState{Provider: domain.ProviderLima, Stack: "lemp", VMInstance: "sandstorm-app"}}, nil
 		},
 	}
 
@@ -1610,5 +1610,104 @@ func TestRunInstallSkillsHelpShowsUsage(t *testing.T) {
 	}
 	if got := stdout.String(); !bytes.Contains([]byte(got), []byte("install-skills [--codex] [--claude] [--force]")) {
 		t.Fatalf("expected install-skills help output, got %q", got)
+	}
+}
+
+func TestPublishOptions(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		want    services.PublishOptions
+		invalid bool
+	}{
+		{[]string{"--webkey", "https://index.example#token", "input.spk"}, services.PublishOptions{Webkey: "https://index.example#token"}, false},
+		{[]string{"--webkey=https://index.example#token", "--status", "input.spk"}, services.PublishOptions{Webkey: "https://index.example#token", Status: true}, false},
+		{[]string{"-s", "input.spk"}, services.PublishOptions{Status: true}, false},
+		{[]string{"--embargo", "input.spk"}, services.PublishOptions{Embargo: true}, false},
+		{[]string{"-e", "input.spk"}, services.PublishOptions{Embargo: true}, false},
+		{[]string{"--remove", "input.spk"}, services.PublishOptions{Remove: true}, false},
+		{[]string{"-r", "input.spk"}, services.PublishOptions{Remove: true}, false},
+		{[]string{"--status", "--embargo", "input.spk"}, services.PublishOptions{}, true},
+		{[]string{"--remove", "--embargo", "input.spk"}, services.PublishOptions{}, true},
+		{[]string{"--remove", "--status", "input.spk"}, services.PublishOptions{}, true},
+		{[]string{"--webkey"}, services.PublishOptions{}, true},
+		{[]string{"--unknown", "input.spk"}, services.PublishOptions{}, true},
+		{[]string{"input.spk", "extra.spk"}, services.PublishOptions{}, true},
+		{[]string{"input.spk", "--status"}, services.PublishOptions{}, true},
+		{nil, services.PublishOptions{}, true},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			called := false
+			app := &fakeApp{publish: func(_ context.Context, _, path string, opts services.PublishOptions, _ domain.ProviderName) (*services.PackageCommandResult, error) {
+				called = true
+				if path != "input.spk" || opts != tc.want {
+					t.Fatalf("path=%q opts=%+v", path, opts)
+				}
+				return &services.PackageCommandResult{Stdout: "review pending\n", Stderr: "talking to index\n"}, nil
+			}}
+			var out, errOut bytes.Buffer
+			err := Run(context.Background(), appSet(app), Config{Program: "spktool", Args: append([]string{"publish"}, tc.args...), Stdout: &out, Stderr: &errOut})
+			if tc.invalid {
+				if err == nil || called {
+					t.Fatalf("err=%v called=%v", err, called)
+				}
+				return
+			}
+			if err != nil || !called || out.String() != "review pending\n" || errOut.String() != "talking to index\n" {
+				t.Fatalf("err=%v stdout=%q stderr=%q", err, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+func TestPublishHelp(t *testing.T) {
+	var out bytes.Buffer
+	if err := Run(context.Background(), appSet(&fakeApp{}), Config{Program: "spktool", Args: []string{"publish", "--help"}, Stdout: &out, Stderr: &bytes.Buffer{}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"webkey", "status", "embargo", "remove"} {
+		if !strings.Contains(out.String(), flag) {
+			t.Fatalf("missing %s: %s", flag, out.String())
+		}
+	}
+}
+
+func TestRespondCommandPreservesStreams(t *testing.T) {
+	for _, payload := range []any{
+		&services.PackageCommandResult{Stdout: "output\n", Stderr: "diagnostic\n"},
+		&services.PackResult{Stdout: "output\n", Stderr: "diagnostic\n", OutputPath: "app.spk"},
+		runner.Result{Stdout: "output\n", Stderr: "diagnostic\n"},
+	} {
+		for _, fail := range []bool{false, true} {
+			for _, format := range []string{"text", "json"} {
+				var out, errOut bytes.Buffer
+				var commandErr error
+				if fail {
+					commandErr = fmt.Errorf("command failed")
+				}
+				err := respondCommand(&out, &errOut, format, payload, commandErr)
+				if format == "text" {
+					if err != commandErr || !strings.HasPrefix(out.String(), "output\n") || errOut.String() != "diagnostic\n" {
+						t.Fatalf("err=%v out=%q stderr=%q", err, out.String(), errOut.String())
+					}
+				} else {
+					var decoded struct {
+						OK     bool `json:"ok"`
+						Result struct {
+							Stdout string `json:"stdout"`
+							Stderr string `json:"stderr"`
+						} `json:"result"`
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+						t.Fatal(err)
+					}
+					if decoded.OK == fail || decoded.Result.Stdout != "output\n" || decoded.Result.Stderr != "diagnostic\n" || errOut.Len() != 0 {
+						t.Fatalf("unexpected JSON: %s stderr=%s", out.String(), errOut.String())
+					}
+				}
+			}
+		}
 	}
 }
