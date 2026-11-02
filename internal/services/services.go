@@ -37,6 +37,8 @@ type PackOptions struct {
 }
 
 type PackResult struct {
+	Stdout     string `json:"stdout,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
 	OutputPath string `json:"outputPath"`
 	PackageID  string `json:"packageId,omitempty"`
 	AppID      string `json:"appId,omitempty"`

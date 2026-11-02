@@ -509,3 +509,23 @@ func TestProviderCoreContract(t *testing.T) {
 		},
 	})
 }
+
+func TestPublishWebkeyIsPassedAndRedacted(t *testing.T) {
+	r := &captureRunner{}
+	provider := New(r, templates.New())
+	arg := "--webkey=https://index.example#token'with-quote"
+	_, err := provider.Exec(context.Background(), providers.ProjectContext{WorkDir: "/workspace/demo"}, []string{"spk", "publish", arg, "app.spk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Join(r.spec.Args, " ")
+	if !strings.Contains(command, shellJoin([]string{arg})) {
+		t.Fatalf("webkey not forwarded: %q", command)
+	}
+	for _, secret := range r.spec.Redactions {
+		command = strings.ReplaceAll(command, secret, "[REDACTED]")
+	}
+	if strings.Contains(command, "token") {
+		t.Fatalf("webkey not redacted: %q", command)
+	}
+}

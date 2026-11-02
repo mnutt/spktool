@@ -24,12 +24,12 @@ type ProjectBootstrapApp interface {
 }
 
 type PackageApp interface {
-	Init(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
+	Init(context.Context, string, domain.ProviderName) (*services.PackageCommandResult, error)
 	Dev(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	Build(context.Context, string, domain.ProviderName) (*domain.ProjectState, error)
 	Pack(context.Context, string, string, services.PackOptions, domain.ProviderName) (*services.PackResult, error)
-	Verify(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
-	Publish(context.Context, string, string, domain.ProviderName) (*domain.ProjectState, error)
+	Verify(context.Context, string, string, domain.ProviderName) (*services.PackageCommandResult, error)
+	Publish(context.Context, string, string, services.PublishOptions, domain.ProviderName) (*services.PackageCommandResult, error)
 }
 
 type KeyApp interface {
@@ -131,7 +131,7 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 		return runConfig(ctx, apps.Bootstrap, cfg.Stdout, global.Output, global.WorkDir, providerOverride, args[1:])
 	case "init":
 		state, err := apps.Packages.Init(ctx, global.WorkDir, providerOverride)
-		return respond(cfg.Stdout, global.Output, state, err)
+		return respondCommand(cfg.Stdout, cfg.Stderr, global.Output, state, err)
 	case "dev":
 		state, err := apps.Packages.Dev(ctx, global.WorkDir, providerOverride)
 		return respond(cfg.Stdout, global.Output, state, err)
@@ -145,25 +145,21 @@ func Run(ctx context.Context, apps Applications, cfg Config) error {
 			return writeUsage(cfg.Stdout, global.Output, "verify spk path is required", "verify <input.spk>")
 		}
 		state, err := apps.Packages.Verify(ctx, global.WorkDir, args[1], providerOverride)
-		return respond(cfg.Stdout, global.Output, state, err)
+		return respondCommand(cfg.Stdout, cfg.Stderr, global.Output, state, err)
 	case "publish":
-		if len(args) < 2 {
-			return writeUsage(cfg.Stdout, global.Output, "publish spk path is required", "publish <input.spk>")
-		}
-		state, err := apps.Packages.Publish(ctx, global.WorkDir, args[1], providerOverride)
-		return respond(cfg.Stdout, global.Output, state, err)
+		return runPublish(ctx, apps.Packages, cfg.Stdout, cfg.Stderr, global.Output, global.WorkDir, providerOverride, args[1:])
 	case "keygen":
 		result, err := apps.Keys.Keygen(ctx, global.WorkDir, args[1:], providerOverride)
-		return respond(cfg.Stdout, global.Output, result, err)
+		return respondCommand(cfg.Stdout, cfg.Stderr, global.Output, result, err)
 	case "listkeys":
 		result, err := apps.Keys.ListKeys(ctx, global.WorkDir, args[1:], providerOverride)
-		return respond(cfg.Stdout, global.Output, result, err)
+		return respondCommand(cfg.Stdout, cfg.Stderr, global.Output, result, err)
 	case "getkey":
 		if len(args) < 2 {
 			return writeUsage(cfg.Stdout, global.Output, "getkey key id is required", "getkey <key-id>")
 		}
 		result, err := apps.Keys.GetKey(ctx, global.WorkDir, args[1], providerOverride)
-		return respond(cfg.Stdout, global.Output, result, err)
+		return respondCommand(cfg.Stdout, cfg.Stderr, global.Output, result, err)
 	case "enter-grain":
 		state, err := apps.Grains.EnterGrain(ctx, global.WorkDir, providerOverride, global.NonInter)
 		return respond(cfg.Stdout, global.Output, state, err)
@@ -297,6 +293,41 @@ func runSetupVM(ctx context.Context, app ProjectBootstrapApp, out, errOut io.Wri
 	return respond(out, format, state, err)
 }
 
+const publishUsage = "publish [--webkey <url#token>] [--status | --embargo | --remove] <input.spk>"
+
+func runPublish(ctx context.Context, app PackageApp, out, errOut io.Writer, format, workDir string, provider domain.ProviderName, args []string) error {
+	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
+	flags.SetOutput(errOut)
+	var opts services.PublishOptions
+	flags.StringVar(&opts.Webkey, "webkey", "", "submit to this app index webkey")
+	flags.BoolVar(&opts.Status, "status", false, "check submission review status")
+	flags.BoolVar(&opts.Status, "s", false, "alias for --status")
+	flags.BoolVar(&opts.Embargo, "embargo", false, "submit for review without public release")
+	flags.BoolVar(&opts.Embargo, "e", false, "alias for --embargo")
+	flags.BoolVar(&opts.Remove, "remove", false, "withdraw or unpublish the package")
+	flags.BoolVar(&opts.Remove, "r", false, "alias for --remove")
+	help := flags.Bool("help", false, "show help")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *help {
+		if _, err := fmt.Fprint(out, "Usage: spktool "+publishUsage+"\nPlace flags before the package filename.\n\n"); err != nil {
+			return err
+		}
+		flags.SetOutput(out)
+		flags.PrintDefaults()
+		return nil
+	}
+	if flags.NArg() != 1 {
+		return fmt.Errorf("publish requires exactly one package filename; usage: %s", publishUsage)
+	}
+	if err := opts.Validate(); err != nil {
+		return err
+	}
+	result, err := app.Publish(ctx, workDir, flags.Arg(0), opts, provider)
+	return respondCommand(out, errOut, format, result, err)
+}
+
 func runPack(ctx context.Context, app PackageApp, out, errOut io.Writer, format, workDir string, providerOverride domain.ProviderName, args []string) error {
 	flags := flag.NewFlagSet("pack", flag.ContinueOnError)
 	flags.SetOutput(errOut)
@@ -318,7 +349,7 @@ func runPack(ctx context.Context, app PackageApp, out, errOut io.Writer, format,
 		return writeUsage(out, format, "--set-version may only be used with --dev", "pack --dev --set-version <version> <output.spk>")
 	}
 	result, err := app.Pack(ctx, workDir, rest[0], opts, providerOverride)
-	return respond(out, format, result, err)
+	return respondCommand(out, errOut, format, result, err)
 }
 
 func runInstallSkills(ctx context.Context, app SkillApp, out, errOut io.Writer, format, workDir string, nonInteractive bool, args []string) error {
@@ -462,7 +493,7 @@ Commands:
   build
   pack <output.spk>
   verify <input.spk>
-  publish <input.spk>
+  publish [--webkey <url#token>] [--status | --embargo | --remove] <input.spk>
   keygen [args...]
   listkeys [args...]
   getkey <key-id>
@@ -583,6 +614,48 @@ func resolveProvider(raw string, fallback domain.ProviderName) domain.ProviderNa
 		return domain.ProviderName(raw)
 	}
 	return fallback
+}
+
+// Captured command output belongs on its original stream. JSON retains both
+// streams in the result without mixing raw text into the JSON document.
+func respondCommand(out, errOut io.Writer, format string, payload any, commandErr error) error {
+	var stdout, stderr string
+	switch v := payload.(type) {
+	case *services.PackageCommandResult:
+		if v != nil {
+			stdout, stderr = v.Stdout, v.Stderr
+		}
+	case *services.PackResult:
+		if v != nil {
+			stdout, stderr = v.Stdout, v.Stderr
+		}
+	case runner.Result:
+		stdout, stderr = v.Stdout, v.Stderr
+	}
+	if format == "json" {
+		if commandErr != nil {
+			return writePayload(out, format, map[string]any{"ok": false, "error": commandErr.Error(), "result": payload})
+		}
+		return respond(out, format, payload, nil)
+	}
+	if _, err := io.WriteString(out, stdout); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(errOut, stderr); err != nil {
+		return err
+	}
+	if commandErr != nil {
+		return commandErr
+	}
+	switch v := payload.(type) {
+	case *services.PackResult:
+		return respond(out, format, v, nil)
+	case *services.PackageCommandResult:
+		if v != nil && stdout == "" && stderr == "" {
+			return respond(out, format, v.ProjectState, nil)
+		}
+	}
+	return nil
 }
 
 func respond(out io.Writer, format string, payload any, err error) error {

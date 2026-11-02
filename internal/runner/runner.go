@@ -157,7 +157,7 @@ func (r *ExecRunner) runOnce(ctx context.Context, spec Spec, traceID string) (Re
 	err := cmd.Run()
 	result := Result{
 		TraceID:  traceID,
-		Command:  strings.TrimSpace(strings.Join(append([]string{spec.Command}, spec.Args...), " ")),
+		Command:  redact(strings.TrimSpace(strings.Join(append([]string{spec.Command}, spec.Args...), " ")), spec.Redactions),
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 		Duration: time.Since(start),

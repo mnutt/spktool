@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -1997,7 +1998,7 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 		detectInstance: "sandstorm-app-1234",
 		execResults: []runner.Result{
 			{Stdout: testPkgdefJSON("hostabcdefghijklmnop") + "\n"},
-			{},
+			{Stdout: "package details\n", Stderr: "packing\n"},
 		},
 		execHook: func(project providers.ProjectContext, _ []string) error {
 			return os.WriteFile(filepath.Join(project.WorkDir, "sandstorm-package.spk"), []byte("pkg"), 0o644)
@@ -2019,6 +2020,9 @@ func TestPackBuildsGuestPackageAndMovesHostArtifact(t *testing.T) {
 		t.Fatalf("unexpected pack result: %+v", result)
 	}
 
+	if result.Stdout != "package details\n" || result.Stderr != "packing\n" {
+		t.Fatalf("missing command output: %+v", result)
+	}
 	gotCmd := strings.Join(flattenCommands(plugin.execCommands), " ")
 	if !strings.Contains(gotCmd, "cd /opt/app/.sandstorm") ||
 		!strings.Contains(gotCmd, "spk pack") ||
@@ -2194,7 +2198,7 @@ func TestPublishStagesPackageRunsGuestPublishAndCleansUp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Publish(context.Background(), workDir, input, ""); err != nil {
+	if _, err := svc.Publish(context.Background(), workDir, input, services.PublishOptions{}, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2260,7 +2264,7 @@ func TestPublishSkipsSelfCopyWhenPackageIsAlreadyStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Publish(context.Background(), workDir, input, ""); err != nil {
+	if _, err := svc.Publish(context.Background(), workDir, input, services.PublishOptions{}, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2501,5 +2505,87 @@ func TestUpgradeVMMigratesLegacyLimaLayout(t *testing.T) {
 	}
 	if got := string(localData); !strings.Contains(got, `provider = "lima"`) {
 		t.Fatalf("unexpected local config: %q", got)
+	}
+}
+
+func TestPublishForwardsOptionsAndOutput(t *testing.T) {
+	for _, tc := range []struct {
+		opts services.PublishOptions
+		flag string
+	}{
+		{services.PublishOptions{Status: true}, "--status"},
+		{services.PublishOptions{Embargo: true}, "--embargo"},
+		{services.PublishOptions{Remove: true}, "--remove"},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			workDir := t.TempDir()
+			plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "app", execResult: runner.Result{Stdout: "status\n", Stderr: "progress\n"}}
+			svc := newService(t, plugin, t.TempDir())
+			if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+				t.Fatal(err)
+			}
+			input := filepath.Join(t.TempDir(), "input.spk")
+			if err := os.WriteFile(input, []byte("package"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			tc.opts.Webkey = "https://index.example#token"
+			result, err := svc.Publish(context.Background(), workDir, input, tc.opts, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"spk", "publish", "--keyring=/host-dot-sandstorm/sandstorm-keyring", "--webkey=https://index.example#token", tc.flag, "/opt/app/.sandstorm/input.spk"}
+			if fmt.Sprint(plugin.lastExecCmd) != fmt.Sprint(want) {
+				t.Fatalf("command=%q want=%q", plugin.lastExecCmd, want)
+			}
+			if result.Stdout != "status\n" || result.Stderr != "progress\n" {
+				t.Fatalf("result=%+v", result)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".sandstorm", "input.spk")); !os.IsNotExist(err) {
+				t.Fatalf("staged package remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestPackageCommandsPreserveOutput(t *testing.T) {
+	for _, name := range []string{"init", "verify", "publish"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fail=%v", name, fail), func(t *testing.T) {
+				workDir := t.TempDir()
+				plugin := &fakePlugin{name: domain.ProviderLima, detectInstance: "app", execResult: runner.Result{Stdout: "details\n", Stderr: "diagnostic\n"}}
+				svc := newService(t, plugin, t.TempDir())
+				if _, err := svc.SetupVM(context.Background(), workDir, domain.ProviderLima, "lemp", false); err != nil {
+					t.Fatal(err)
+				}
+				if fail {
+					plugin.execErr = errors.New("guest failed")
+				}
+				input := filepath.Join(t.TempDir(), "app.spk")
+				if err := os.WriteFile(input, []byte("package"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				var result *services.PackageCommandResult
+				var err error
+				switch name {
+				case "init":
+					result, err = svc.Init(context.Background(), workDir, "")
+				case "verify":
+					result, err = svc.Verify(context.Background(), workDir, input, "")
+				case "publish":
+					result, err = svc.Publish(context.Background(), workDir, input, services.PublishOptions{}, "")
+				}
+				if (err != nil) != fail {
+					t.Fatalf("err=%v", err)
+				}
+				if result == nil || result.Stdout != "details\n" || result.Stderr != "diagnostic\n" {
+					t.Fatalf("result=%+v", result)
+				}
+				if name != "init" {
+					if _, err := os.Stat(filepath.Join(workDir, ".sandstorm", "app.spk")); !os.IsNotExist(err) {
+						t.Fatalf("staged package remains: %v", err)
+					}
+				}
+			})
+		}
 	}
 }
