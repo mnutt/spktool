@@ -10,10 +10,14 @@ color_index=0
 cleanup() {
   for pid in "${tail_pids[@]:-}"; do
     kill "$pid" 2>/dev/null || true
+  done
+  for pid in "${tail_pids[@]:-}"; do
     wait "$pid" 2>/dev/null || true
   done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 spawn_tail() {
   local grain_id="$1"
@@ -30,7 +34,21 @@ spawn_tail() {
   fi
 
   (
-    tail -n 0 -F "$log_path" 2>/dev/null | while IFS= read -r line; do
+    # Keep the formatter in this shell so it can terminate and reap its tail.
+    # Killing a shell around a pipeline does not kill the pipeline's children.
+    tail_pid=
+    cleanup_tail() {
+      if [ -n "$tail_pid" ]; then
+        kill "$tail_pid" 2>/dev/null || true
+        wait "$tail_pid" 2>/dev/null || true
+      fi
+    }
+    trap cleanup_tail EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    exec {log_fd}< <(exec tail -n 0 -F "$log_path" 2>/dev/null)
+    tail_pid=$!
+    while IFS= read -r line <&"$log_fd"; do
       printf '\r\033[K\033[%sm[%s]\033[0m %s\n' "$color" "$prefix" "$line"
     done
   ) &
